@@ -1,7 +1,7 @@
 # mod_realtime_ws 与 realtime-router 技术方案
 
-版本：v0.1  
-状态：评审稿  
+版本：v0.1
+状态：评审稿
 目标：为 FreeSWITCH 接入端到端实时语音大模型定义模块边界、技术架构、时序、内部 WebSocket 协议、消息事件与厂商适配方案。
 
 ## 1. 背景与目标
