@@ -58,6 +58,9 @@ size_t rtw_session_read_playout(rtw_session_t *s, uint8_t *out, size_t max_len);
 
 int rtw_session_stop(rtw_session_t *s);
 
+/* Re-queue connected+start after WS reconnect (keeps streamSid / playout). */
+int rtw_session_rehandshake(rtw_session_t *s);
+
 #ifdef __cplusplus
 }
 #endif

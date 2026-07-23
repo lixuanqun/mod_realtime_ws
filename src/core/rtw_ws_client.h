@@ -14,9 +14,13 @@ typedef void (*rtw_ws_on_text_fn)(void *userdata, const char *text, size_t len);
 typedef void (*rtw_ws_on_close_fn)(void *userdata, int code);
 
 /*
- * Minimal RFC6455 client for ws:// only (no TLS). Sufficient for local tests.
- * url example: ws://127.0.0.1:8081/media
+ * RFC6455 client: ws:// always; wss:// when built with RTW_HAS_OPENSSL.
+ *
+ * TLS verify: enabled by default for wss://. Set env RTW_TLS_INSECURE=1
+ * (or call rtw_ws_set_tls_insecure(1)) to skip certificate verification — lab only.
  */
+void rtw_ws_set_tls_insecure(int insecure);
+
 rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
                                 rtw_ws_on_close_fn on_close, void *userdata);
 void rtw_ws_close(rtw_ws_client_t *c);
@@ -27,6 +31,7 @@ int rtw_ws_send_text(rtw_ws_client_t *c, const char *text, size_t len);
 int rtw_ws_poll(rtw_ws_client_t *c, int timeout_ms);
 
 int rtw_ws_fd(const rtw_ws_client_t *c);
+int rtw_ws_is_tls(const rtw_ws_client_t *c);
 
 #ifdef __cplusplus
 }

@@ -194,7 +194,7 @@ Consumers written for Twilio Media Streams should only need to account for:
 
 | Topic | Twilio | mod_realtime_ws |
 |-------|--------|-----------------|
-| Transport | `wss://` from Twilio | **`ws://` only today**; `wss://` rejected until TLS lands |
+| Transport | `wss://` from Twilio | **`ws://` and `wss://`** (OpenSSL build). Lab: `RTW_TLS_INSECURE=1` for self-signed |
 | `streamSid` | Twilio-assigned `MZ…` | Generated `MZ` + 32 hex from channel UUID |
 | `callSid` | Twilio `CA…` | `CA` + 32 hex derived from channel UUID |
 | `accountSid` | Real account | Configurable placeholder (`ACmodrealtimews…` default) |

@@ -23,26 +23,29 @@ Dates are intentionally omitted; order is by dependency risk.
 - [x] Study mod_audio_stream public patterns — MIT bridge + media-bug layout (`rtw_bridge`, `rtw_tech_t`)
 - [x] Stub harness self-test (`make harness` / `./scripts/mod_harness_test.sh`) — duplex + clear without libfreeswitch
 - [x] Out-of-tree build recipe (`Makefile.fs`, `scripts/build-mod-realtime-ws.sh`)
-- [x] Design review fixes: media-thread no WS I/O, idempotent stop, `ws://`-only validate, CA/MZ SIDs, metadata `{…}` parse
-- [ ] Link/run `.so` on real FreeSWITCH 1.10.x + complete WRITE_REPLACE inject
-- [ ] `wss://` TLS client (required before production)
+- [x] Design review fixes: media-thread no WS I/O, idempotent stop, CA/MZ SIDs, metadata `{…}` parse
+- [x] `wss://` TLS client (OpenSSL) + `./scripts/wss_smoke_test.sh`
+- [x] WRITE_REPLACE inject helper (`rtw_bridge_apply_write_frame`) wired in HAVE_FREESWITCH callback
+- [x] Basic WS reconnect + `rtw_session_rehandshake` (opt-out `RTW_RECONNECT=0`)
+- [ ] Link/run `.so` on real FreeSWITCH 1.10.x soak + verify WRITE_REPLACE audible path
 - [ ] Lua dialplan live on FS (example drafted in `conf/dialplan_example.lua`)
 - [ ] Side-by-side parity notes: audio_stream vs realtime_ws (features, latency, license)
 
 ## Phase 2 — Production hardening
 
 - [x] Bounded queues with drop-oldest (core)
-- [ ] Reconnect policy without killing the call
+- [x] Reconnect policy without killing the call (basic backoff; expand jitter/metrics later)
 - [ ] Auth hooks (token/header)
-- [ ] Record-session interaction flags
+- [x] Record-session interaction flag (`record_injected`, default on)
 - [x] Load/stress harness (expand targets as needed)
+- [ ] Clear-latency histogram / SLO
 
 ## Phase 3 — Extensions (L1+)
 
 - [ ] Binary L16 option
 - [ ] Negotiated sample rates (16k/24k) with capability advertising
 - [ ] Multi-sink (L2)
-- [ ] WS server mode / `wss://` (TLS)
+- [ ] WS server mode
 
 ## Explicit non-goals (near term)
 
@@ -55,7 +58,7 @@ Dates are intentionally omitted; order is by dependency risk.
 ```bash
 make unit          # codec + protocol + playout/session + fixtures
 make harness       # FS-stub module bridge binary
-./scripts/smoke_test.sh              # unit + sim + mod harness
+./scripts/smoke_test.sh              # unit + sim + mod harness + wss
 CONCURRENCY=50 SECONDS_RUN=5 ./scripts/stress_test.sh
 # With libfreeswitch-dev:
 ./scripts/build-mod-realtime-ws.sh   # see docs/BUILD_FS.md

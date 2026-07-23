@@ -15,10 +15,10 @@ ifeq ($(strip $(FS_CFLAGS)),)
 $(error FreeSWITCH pkg-config not found. Install libfreeswitch-dev or set PKG_CONFIG_PATH)
 endif
 
-CFLAGS ?= -O2 -g -Wall -Wextra -fPIC -DHAVE_FREESWITCH
+CFLAGS ?= -O2 -g -Wall -Wextra -fPIC -DHAVE_FREESWITCH -DRTW_HAS_OPENSSL
 CFLAGS += $(FS_CFLAGS) -I src/core -I src/mod -I third_party/cJSON
 LDFLAGS ?= -shared
-LIBS ?= $(FS_LIBS) -lpthread -lm
+LIBS ?= $(FS_LIBS) -lpthread -lm -lssl -lcrypto
 
 MOD_SRCS = \
 	src/mod/mod_realtime_ws.c \

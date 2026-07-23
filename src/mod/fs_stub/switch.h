@@ -52,6 +52,15 @@ typedef struct switch_core_session {
     switch_media_bug_t *bug;
 } switch_core_session_t;
 
+typedef struct switch_frame {
+    void *data;
+    uint32_t datalen;
+    uint32_t buflen;
+    uint32_t samples;
+    uint32_t rate;
+    uint32_t channels;
+} switch_frame_t;
+
 struct switch_channel {
     char name[128];
     void *privates[8];
@@ -62,6 +71,8 @@ struct switch_channel {
 struct switch_media_bug {
     switch_core_session_t *session;
     void *user_data;
+    switch_frame_t *write_replace_frame_in;
+    switch_frame_t *write_replace_frame_out;
 };
 
 struct switch_mutex {
@@ -279,6 +290,18 @@ static inline void rtw_stub_session_destroy(switch_core_session_t *s)
     }
     free(s->channel);
     free(s);
+}
+
+static inline switch_frame_t *switch_core_media_bug_get_write_replace_frame(switch_media_bug_t *bug)
+{
+    return bug ? bug->write_replace_frame_in : NULL;
+}
+
+static inline void switch_core_media_bug_set_write_replace_frame(switch_media_bug_t *bug, switch_frame_t *frame)
+{
+    if (bug) {
+        bug->write_replace_frame_out = frame;
+    }
 }
 
 #endif

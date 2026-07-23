@@ -41,12 +41,12 @@
 
 | # | Requirement | Status |
 |---|-------------|--------|
-| 1 | **Open duplex** + `clear` without commercial binary | Core + stub harness ✅; live FS WRITE_REPLACE ⏳ |
+| 1 | **Open duplex** + `clear` without commercial binary | Core + stub harness ✅; WRITE_REPLACE path coded ✅; live FS soak ⏳ |
 | 2 | **Twilio L0 interop** with documented deltas only | L0 events ✅; see PROTOCOL deltas |
 | 3 | **FS-correct lifecycle** (hangup/transfer safe, no UAF) | Idempotent `cleanup_started` ✅; live FS soak ⏳ |
 | 4 | **Thread contract**: bug = enqueue only; WS on worker | Enforced in `rtw_bridge` ✅ |
 | 5 | **Bounded memory** drop-oldest | Outbound queue ✅ |
-| 6 | **Record policy** flag for injected audio | Not started ⏳ |
+| 6 | **Record policy** flag for injected audio | `record_injected` default 1 (documented) ✅; FS config XML ⏳ |
 | 7 | **Measurable barge-in** clear→audible stop P95 | Counter only; latency SLO ⏳ |
 | 8 | **MIT** for production duplex path | ✅ |
 
@@ -87,8 +87,8 @@ Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_s
 
 | Mode | Description | v1 |
 |------|-------------|----|
-| **Client `ws://`** | Module dials out (dev/lab) | Required now |
-| **Client `wss://`** | TLS dial-out | Required before production |
+| **Client `ws://`** | Module dials out (dev/lab) | ✅ |
+| **Client `wss://`** | TLS dial-out (OpenSSL build) | ✅ (`RTW_TLS_INSECURE=1` for lab self-signed) |
 | **Server** | Peer connects in | Later |
 | **Strict Twilio** | mulaw/8000 + JSON base64 | Required |
 | **Extended** | L16, negotiated rates, multi-sink | Optional flags |
@@ -180,31 +180,31 @@ mod_realtime_ws/
 
 ## 11. Security notes
 
-- Prefer `wss://` in production — **not implemented yet**; validator currently accepts **`ws://` only** so TLS is not silently fake.
+- Prefer `wss://` in production (built when OpenSSL headers present → `-DRTW_HAS_OPENSSL`).
+- TLS verify is **on by default**. Lab self-signed: `RTW_TLS_INSECURE=1` or `rtw_ws_set_tls_insecure(1)`.
 - Optional shared-secret / JWT in URL or metadata (gateway validates).
 - Do not log raw audio or credentials.
 - Twilio `X-Twilio-Signature` applies to Twilio-originated streams; FS-as-producer needs our own auth story.
 
-## 12. Design review (2026-07-23) — findings & fixes
+## 12. Design review — findings & follow-ups
 
-Review focused on gaps between written architecture and the shipping bridge.
+| Finding | Severity | Status |
+|---------|----------|--------|
+| Media path WS I/O | High | Fixed (enqueue-only) |
+| `do_stop` + `CLOSE` double-free | High | Fixed (idempotent stop) |
+| Fake `wss://` accept | High | Fixed → real OpenSSL `wss://` + smoke |
+| WRITE_REPLACE stub only | High | Coded `get/set_write_replace_frame` + `apply_write_frame` |
+| Raw UUID as callSid | Med | Fixed CA/MZ hex |
+| Metadata space-split | Med | Fixed `{…}` slice |
+| No reconnect | Med | Basic backoff reconnect + `rehandshake` (disable: `RTW_RECONNECT=0`) |
+| Record policy | Med | `record_injected` default documented |
+| Clear-latency SLO | Low | Still open |
+| Session-pool alloc | Low | Still `calloc` until live FS |
 
-| Finding | Severity | Fix |
-|---------|----------|-----|
-| Media path called `flush_outbound` (WS send on media thread) — violated §7 | High | Read/write paths enqueue/read only; worker owns send |
-| `do_stop` + `CLOSE` both called `rtw_bridge_stop` → double-free risk on real FS | High | Idempotent `cleanup_started`; CLOSE owns teardown after `bug_remove` |
-| `rtw_validate_ws_uri` accepted `wss://` but client is `ws://` only | High | Reject `wss://` until TLS lands |
-| `callSid` used raw UUID (not Twilio-like `CA`+hex) | Med | Emit `CA` + 32 hex; `streamSid` = `MZ` + 32 hex |
-| Metadata JSON broken by space-splitting | Med | Slice from first `{` before tokenizing |
-| `pause` toggled flags without mutex | Low | Lock around pause |
-| `send_mark` name unsanitized (JSON injection) | Low | Allowlist `[A-Za-z0-9_.-]` |
-| Architecture layout / checklist stale | Doc | Updated §§1,4,7,10 + this table |
+### Env knobs
 
-### Still open (intentional next work)
-
-1. Real FS `WRITE_REPLACE` frame publish  
-2. `wss://` (TLS) client  
-3. Reconnect without killing the call  
-4. Record-session policy flag  
-5. Clear-latency histogram / SLO  
-6. Pool-allocate `rtw_tech_t` from session memory on real FS (today: `calloc`)
+| Env | Effect |
+|-----|--------|
+| `RTW_TLS_INSECURE=1` | Skip TLS cert verify (lab) |
+| `RTW_RECONNECT=0` | Disable WS reconnect |
+| `RTW_INJECT_MIX=1` | Soft-mix inject instead of replace |

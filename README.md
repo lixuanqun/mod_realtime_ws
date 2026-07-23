@@ -4,7 +4,7 @@
 
 Inspired by battle-tested [mod_audio_stream](https://github.com/amigniter/mod_audio_stream) media-bug patterns, but aimed to **surpass** it: MIT-open full duplex, Twilio `mark`/`clear` barge-in, thin mod + gateway split, multi-sink roadmap. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Positioning.
 
-> Status: **core L0 + module bridge (stub harness) done**; design-review hardening applied (media-thread no WS I/O, idempotent stop, `ws://`-only). Real FS `.so` / WRITE_REPLACE / `wss://` still need `libfreeswitch-dev`. Contributions welcome.
+> Status: **L0 bridge + WRITE_REPLACE helper + `wss://` (OpenSSL) + reconnect**; live FreeSWITCH `.so` soak still needs `libfreeswitch-dev`. Contributions welcome.
 
 [English](#mod_realtime_ws) · [中文](#中文简介)
 
@@ -38,9 +38,9 @@ Existing backends written for Twilio Media Streams can connect to FreeSWITCH wit
 - [x] Portable L0 core (Twilio JSON, mulaw/8k, mark/clear, bounded queue)
 - [x] `rtw_sim` + Node mock smoke / stress tests
 - [x] FreeSWITCH module API + bridge (`rtw_bridge`, media-bug layout)
-- [x] Stub harness duplex/clear self-test (`make harness`)
-- [ ] Out-of-tree FreeSWITCH `.so` verified on live FS + WRITE_REPLACE
-- [ ] Client mode: FS opens `wss://` to your server (TLS)
+- [x] Stub harness duplex/clear/WRITE_REPLACE self-test (`make harness`)
+- [x] `wss://` TLS client (OpenSSL) + wss smoke
+- [ ] Out-of-tree FreeSWITCH `.so` soak on live FS
 - [ ] Optional: binary L16 frames, multi-sink, WS server mode
 
 Non-goals for v1: embedding OpenAI/Gemini/Deepgram SDKs inside the module; video; replacing RTP.
@@ -59,7 +59,7 @@ CONCURRENCY=50 SECONDS_RUN=5 ./scripts/stress_test.sh
 ./scripts/build-mod-realtime-ws.sh   # see docs/BUILD_FS.md
 ```
 
-Requires: `gcc`, `make`, `node`/`npm` (for mock peer). FreeSWITCH headers are **not** required for core/sim/harness tests.
+Requires: `gcc`, `make`, `node`/`npm`, **`libssl-dev`** (for `wss://`). FreeSWITCH headers are **not** required for core/sim/harness tests.
 
 ---
 
@@ -125,7 +125,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Design discussion and protocol test vect
 - **借鉴** [mod_audio_stream](https://github.com/amigniter/mod_audio_stream) 的 media bug / 全双工经验  
 - **超越**：MIT 开放双向、`mark`/`clear` 对齐 Twilio、薄模块 + Gateway、多 sink 路线（见架构文档）  
 - **协议**：兼容 Twilio Media Streams L0  
-- **当前**：core + 模块桥（stub harness 双工/`clear`）已通；真机 `.so` / WRITE_REPLACE 需 `libfreeswitch-dev` 
+- **当前**：L0 桥 + WRITE_REPLACE 辅助 + `wss://`（OpenSSL）+ 重连已通；真机 `.so` soak 需 `libfreeswitch-dev`
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/PROTOCOL.md](docs/PROTOCOL.md)。
 

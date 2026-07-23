@@ -55,10 +55,16 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
     case SWITCH_ABC_TYPE_WRITE:
     case SWITCH_ABC_TYPE_WRITE_REPLACE:
         if (tech && !tech->close_requested && !tech->cleanup_started) {
-            int16_t out[320];
-            size_t n = rtw_bridge_on_write_pcm16(tech, out, 160);
-            (void)n;
-            /* TODO(HAVE_FREESWITCH): publish `out` into write-replace frame. */
+            switch_frame_t *frame = switch_core_media_bug_get_write_replace_frame(bug);
+            if (frame && frame->data && frame->datalen >= (int)sizeof(int16_t)) {
+                size_t nsamples = (size_t)frame->datalen / sizeof(int16_t);
+                size_t n = rtw_bridge_apply_write_frame(tech, (int16_t *)frame->data, nsamples);
+                if (n > 0) {
+                    /* Injected / mixed — frame already mutated in place. */
+                    switch_core_media_bug_set_write_replace_frame(bug, frame);
+                }
+                /* n==0: passthrough original write audio (other leg). */
+            }
         }
         break;
     default:
@@ -248,7 +254,7 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
             if (sampling % 8000 != 0) {
                 stream->write_function(stream, "-ERR invalid sample rate\n");
             } else if (!rtw_validate_ws_uri(argv[2], wsUri, sizeof(wsUri))) {
-                stream->write_function(stream, "-ERR invalid ws uri (ws:// only until TLS lands)\n");
+                stream->write_function(stream, "-ERR invalid ws uri (need ws:// or wss:// with OpenSSL build)\n");
             } else {
                 status = start_capture(lsession, flags, wsUri, sampling, metadata);
             }
@@ -262,7 +268,7 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
     if (!strcasecmp(argv[1], "start") && argc >= 4) {
         char wsUri[RTW_MAX_WS_URI];
         if (!rtw_validate_ws_uri(argv[2], wsUri, sizeof(wsUri))) {
-            stream->write_function(stream, "-ERR invalid ws uri (ws:// only until TLS lands)\n");
+            stream->write_function(stream, "-ERR invalid ws uri (need ws:// or wss:// with OpenSSL build)\n");
             status = SWITCH_STATUS_FALSE;
         } else {
             status = SWITCH_STATUS_SUCCESS;

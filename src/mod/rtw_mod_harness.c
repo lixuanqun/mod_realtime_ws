@@ -14,7 +14,7 @@
 
 static void usage(const char *argv0)
 {
-    fprintf(stderr, "Usage: %s --url ws://host:port/path [--seconds N]\n", argv0);
+    fprintf(stderr, "Usage: %s --url ws[s]://host:port/path [--seconds N]\n", argv0);
 }
 
 int main(int argc, char **argv)
@@ -26,6 +26,7 @@ int main(int argc, char **argv)
     char ws_uri[RTW_MAX_WS_URI];
     int i, frames;
     size_t got_samples = 0;
+    size_t replace_hits = 0;
     int rc = 1;
 
     for (i = 1; i < argc; i++) {
@@ -42,13 +43,19 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
-    /* Guard rails covered by design review fixes */
     {
         char tmp[64];
-        if (rtw_validate_ws_uri("wss://example/media", tmp, sizeof(tmp))) {
-            fprintf(stderr, "harness: wss should be rejected until TLS\n");
+#ifdef RTW_HAS_OPENSSL
+        if (!rtw_validate_ws_uri("wss://example/media", tmp, sizeof(tmp))) {
+            fprintf(stderr, "harness: wss:// should be accepted with OpenSSL\n");
             return 1;
         }
+#else
+        if (rtw_validate_ws_uri("wss://example/media", tmp, sizeof(tmp))) {
+            fprintf(stderr, "harness: wss:// should be rejected without OpenSSL\n");
+            return 1;
+        }
+#endif
         if (!rtw_validate_ws_uri("ws://127.0.0.1:9/x", tmp, sizeof(tmp))) {
             fprintf(stderr, "harness: ws:// should be accepted\n");
             return 1;
@@ -57,6 +64,9 @@ int main(int argc, char **argv)
     if (seconds < 1) {
         seconds = 1;
     }
+
+    /* Avoid reconnect noise in short smoke runs */
+    setenv("RTW_RECONNECT", "0", 1);
 
     session = rtw_stub_session_create("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     if (!session) {
@@ -77,26 +87,37 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    frames = seconds * 50; /* 20ms frames */
+    frames = seconds * 50;
     for (i = 0; i < frames; i++) {
         int16_t pcm[160];
-        int16_t out[160];
+        int16_t frame[160];
         size_t n;
         size_t s;
         for (s = 0; s < 160; s++) {
             double t = (double)(i * 160 + (int)s) / 8000.0;
             pcm[s] = (int16_t)(8000.0 * sin(2.0 * 3.141592653589793 * 440.0 * t));
+            frame[s] = 1000; /* stand-in for other-leg audio */
         }
         rtw_bridge_on_read_pcm16(tech, pcm, 160);
         usleep(20 * 1000);
-        n = rtw_bridge_on_write_pcm16(tech, out, 160);
+        n = rtw_bridge_apply_write_frame(tech, frame, 160);
         got_samples += n;
+        if (n > 0) {
+            replace_hits++;
+            if (frame[0] == 1000) {
+                fprintf(stderr, "harness: WRITE_REPLACE did not mutate frame\n");
+                goto out;
+            }
+        } else if (frame[0] != 1000) {
+            fprintf(stderr, "harness: passthrough mutated empty frame\n");
+            goto out;
+        }
     }
 
     if (got_samples == 0) {
         fprintf(stderr, "harness: no downlink samples (echo mock may be slow); trying clear path\n");
     } else {
-        fprintf(stderr, "harness: downlink samples=%zu\n", got_samples);
+        fprintf(stderr, "harness: downlink samples=%zu replace_hits=%zu\n", got_samples, replace_hits);
     }
 
     if (rtw_bridge_send_mark(tech, "harness1") != SWITCH_STATUS_SUCCESS) {
@@ -108,10 +129,14 @@ int main(int argc, char **argv)
         goto out;
     }
     {
-        int16_t out[160];
-        size_t n = rtw_bridge_on_write_pcm16(tech, out, 160);
-        if (n != 0) {
-            fprintf(stderr, "harness: expected empty playout after clear, got %zu\n", n);
+        int16_t frame[160];
+        size_t s, n;
+        for (s = 0; s < 160; s++) {
+            frame[s] = 42;
+        }
+        n = rtw_bridge_apply_write_frame(tech, frame, 160);
+        if (n != 0 || frame[0] != 42) {
+            fprintf(stderr, "harness: expected passthrough after clear\n");
             goto out;
         }
     }

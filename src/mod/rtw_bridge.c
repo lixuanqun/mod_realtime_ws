@@ -10,7 +10,7 @@
 /*
  * Thread contract (see docs/ARCHITECTURE.md §7):
  * - Media-bug paths (on_read / on_write): mutate session under mutex, NEVER WS I/O.
- * - WS worker: poll + flush_outbound (only place that sends).
+ * - WS worker: poll + flush_outbound (+ reconnect).
  * - on_ws_text runs inside worker poll → may flush.
  */
 
@@ -49,15 +49,58 @@ static void on_ws_close(void *userdata, int code)
     }
 }
 
+static int try_reconnect(rtw_tech_t *tech)
+{
+    int backoff_ms;
+    if (!tech->reconnect_enabled || tech->close_requested || tech->cleanup_started) {
+        return -1;
+    }
+    if (tech->reconnect_max > 0 && tech->reconnect_attempts >= tech->reconnect_max) {
+        return -1;
+    }
+    tech->reconnect_attempts++;
+    backoff_ms = 100 << (tech->reconnect_attempts > 5 ? 5 : tech->reconnect_attempts);
+    if (backoff_ms > 3000) {
+        backoff_ms = 3000;
+    }
+    usleep((useconds_t)backoff_ms * 1000);
+
+    if (tech->ws) {
+        rtw_ws_close(tech->ws);
+        tech->ws = NULL;
+    }
+    tech->ws = rtw_ws_connect(tech->ws_uri, on_ws_text, on_ws_close, tech);
+    if (!tech->ws) {
+        return -1;
+    }
+    tech->ws_ready = 1;
+    if (switch_mutex_lock(tech->mutex) == SWITCH_STATUS_SUCCESS) {
+        rtw_session_rehandshake(&tech->session);
+        flush_outbound(tech);
+        switch_mutex_unlock(tech->mutex);
+    }
+    tech->reconnect_ok++;
+    tech->reconnect_attempts = 0;
+    return 0;
+}
+
 static void *ws_worker(void *arg)
 {
     rtw_tech_t *tech = (rtw_tech_t *)arg;
     while (tech && !tech->close_requested && !tech->cleanup_started) {
-        if (tech->ws) {
+        if (tech->ws && tech->ws_ready) {
             if (rtw_ws_poll(tech->ws, 20) < 0) {
                 tech->ws_ready = 0;
+                if (try_reconnect(tech) != 0) {
+                    break;
+                }
+                continue;
+            }
+        } else if (tech->ws && !tech->ws_ready) {
+            if (try_reconnect(tech) != 0) {
                 break;
             }
+            continue;
         } else {
             usleep(20 * 1000);
         }
@@ -74,9 +117,15 @@ int rtw_validate_ws_uri(const char *url, char *out, size_t out_cap)
     if (!url || !out || out_cap < 8) {
         return 0;
     }
-    /* L0 client currently supports plain ws:// only (no TLS yet). Reject wss://
-     * loudly so operators do not think TLS is on. */
-    if (strncmp(url, "ws://", 5) != 0) {
+    if (strncmp(url, "ws://", 5) == 0) {
+        /* ok */
+    } else if (strncmp(url, "wss://", 6) == 0) {
+#ifdef RTW_HAS_OPENSSL
+        /* ok */
+#else
+        return 0;
+#endif
+    } else {
         return 0;
     }
     if (strlen(url) >= out_cap) {
@@ -136,6 +185,17 @@ static int valid_mark_name(const char *name)
     return 1;
 }
 
+static int16_t clamp_s16(int v)
+{
+    if (v > 32767) {
+        return 32767;
+    }
+    if (v < -32768) {
+        return -32768;
+    }
+    return (int16_t)v;
+}
+
 switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_uri, int sampling,
                                  int channels, const char *metadata, rtw_tech_t **out_tech)
 {
@@ -143,6 +203,7 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     const char *uuid;
     char sid[RTW_SID_MAX];
     char call_sid[RTW_SID_MAX];
+    const char *env;
     if (!session || !ws_uri || !out_tech) {
         return SWITCH_STATUS_FALSE;
     }
@@ -167,6 +228,18 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     }
     tech->sampling = sampling > 0 ? sampling : 8000;
     tech->channels = channels > 0 ? channels : 1;
+    tech->inject_mode = RTW_INJECT_REPLACE;
+    tech->reconnect_enabled = 1;
+    tech->reconnect_max = 10;
+    tech->record_injected = 1; /* WRITE_REPLACE sits on media path → typically recorded */
+    env = getenv("RTW_RECONNECT");
+    if (env && env[0] == '0') {
+        tech->reconnect_enabled = 0;
+    }
+    env = getenv("RTW_INJECT_MIX");
+    if (env && env[0] == '1') {
+        tech->inject_mode = RTW_INJECT_MIX;
+    }
     make_stream_sid(sid, sizeof(sid), tech->session_id);
     make_call_sid(call_sid, sizeof(call_sid), tech->session_id);
     snprintf(tech->stream_sid, sizeof(tech->stream_sid), "%s", sid);
@@ -177,7 +250,7 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
         free(tech);
         return SWITCH_STATUS_FALSE;
     }
-    if (rtw_session_start(&tech->session, tech->stream_sid, tech->call_sid, "ACmodrealtimews000000000000000000",
+    if (rtw_session_start(&tech->session, tech->stream_sid, tech->call_sid, "ACmodrealtimews0000000000000000000",
                           tech->metadata[0] ? tech->metadata : NULL) != 0) {
         rtw_session_destroy(&tech->session);
         switch_mutex_destroy(tech->mutex);
@@ -193,7 +266,6 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
         return SWITCH_STATUS_FALSE;
     }
     tech->ws_ready = 1;
-    /* Startup handshake flush is allowed on the start thread before the worker runs. */
     flush_outbound(tech);
 
     if (pthread_create(&tech->worker, NULL, ws_worker, tech) != 0) {
@@ -215,12 +287,12 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
     if (!tech) {
         return SWITCH_STATUS_FALSE;
     }
-    /* Idempotent: media-bug CLOSE and explicit stop must both be safe. */
     if (tech->cleanup_started) {
         return SWITCH_STATUS_SUCCESS;
     }
     tech->cleanup_started = 1;
     tech->close_requested = 1;
+    tech->reconnect_enabled = 0;
     if (tech->worker_started) {
         pthread_join(tech->worker, NULL);
         tech->worker_started = 0;
@@ -269,8 +341,6 @@ switch_status_t rtw_bridge_clear(rtw_tech_t *tech)
         return SWITCH_STATUS_FALSE;
     }
     rtw_session_handle_peer_json(&tech->session, json);
-    /* Local clear may enqueue mark ACKs; flush from this control path is OK
-     * (API/ESL thread, not media bug). */
     flush_outbound(tech);
     switch_mutex_unlock(tech->mutex);
     return SWITCH_STATUS_SUCCESS;
@@ -282,8 +352,6 @@ switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name)
     if (!tech || !name || tech->cleanup_started || !valid_mark_name(name)) {
         return SWITCH_STATUS_FALSE;
     }
-    /* Operator/API mark: treat as peer mark (queued against playout) for testing
-     * barge-in / ACK paths. Not a Twilio wire event from FS→peer. */
     snprintf(json, sizeof(json),
              "{\"event\":\"mark\",\"streamSid\":\"%s\",\"mark\":{\"name\":\"%s\"}}", tech->stream_sid, name);
     if (switch_mutex_lock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
@@ -304,7 +372,6 @@ switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, siz
     if (switch_mutex_trylock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
         return SWITCH_TRUE;
     }
-    /* Enqueue only — worker flushes WS. */
     while (i < nsamples) {
         int16_t sample = pcm[i++];
         if (tech->sampling == 16000) {
@@ -340,7 +407,33 @@ size_t rtw_bridge_on_write_pcm16(rtw_tech_t *tech, int16_t *out, size_t max_samp
     if (n > 0) {
         rtw_mulaw_to_pcm16(mulaw, n, out);
     }
-    /* Mark ACKs stay queued until the WS worker flushes — no I/O here. */
     switch_mutex_unlock(tech->mutex);
+    return n;
+}
+
+size_t rtw_bridge_apply_write_frame(rtw_tech_t *tech, int16_t *inout_pcm, size_t nsamples)
+{
+    int16_t agent[640];
+    size_t n;
+    size_t i;
+    size_t want;
+    if (!tech || !inout_pcm || nsamples == 0 || tech->cleanup_started) {
+        return 0;
+    }
+    want = nsamples < (sizeof(agent) / sizeof(agent[0])) ? nsamples : (sizeof(agent) / sizeof(agent[0]));
+    n = rtw_bridge_on_write_pcm16(tech, agent, want);
+    if (n == 0) {
+        return 0; /* passthrough: leave inout unchanged */
+    }
+    if (tech->inject_mode == RTW_INJECT_MIX) {
+        for (i = 0; i < n; i++) {
+            inout_pcm[i] = clamp_s16((int)inout_pcm[i] + (int)agent[i]);
+        }
+    } else {
+        memcpy(inout_pcm, agent, n * sizeof(int16_t));
+        if (n < nsamples) {
+            memset(inout_pcm + n, 0, (nsamples - n) * sizeof(int16_t));
+        }
+    }
     return n;
 }

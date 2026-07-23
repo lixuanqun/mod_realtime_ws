@@ -40,7 +40,6 @@ See `conf/dialplan_example.lua` for Lua/ESL lifecycle (prefer over `${api(...)}`
 
 ### Still pending on real FS
 
-- Full `WRITE_REPLACE` frame publish into the call leg
-- `wss://` (TLS) client — validator currently **rejects** `wss://` on purpose
-- Record-session interaction flag
+- Soak-test `WRITE_REPLACE` audible inject on a live call
 - Session-pool allocation for `rtw_tech_t` (today: `calloc`)
+- Autoload XML / production TLS trust store (not `RTW_TLS_INSECURE`)

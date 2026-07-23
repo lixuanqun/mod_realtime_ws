@@ -3,14 +3,19 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <poll.h>
-#include <stdint.h>
+
+#ifdef RTW_HAS_OPENSSL
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#endif
 
 struct rtw_ws_client {
     int fd;
@@ -21,19 +26,56 @@ struct rtw_ws_client {
     size_t rx_len;
     size_t rx_cap;
     int closed;
+    int use_tls;
+#ifdef RTW_HAS_OPENSSL
+    SSL_CTX *ssl_ctx;
+    SSL *ssl;
+#endif
 };
 
+static int g_tls_insecure = -1; /* -1 = unset (read env), 0/1 = forced */
+
+void rtw_ws_set_tls_insecure(int insecure)
+{
+    g_tls_insecure = insecure ? 1 : 0;
+}
+
+static int tls_insecure_enabled(void)
+{
+    const char *e;
+    if (g_tls_insecure >= 0) {
+        return g_tls_insecure;
+    }
+    e = getenv("RTW_TLS_INSECURE");
+    return (e && e[0] == '1') ? 1 : 0;
+}
+
 static int parse_url(const char *url, char *host, size_t host_cap, int *port, char *path,
-                     size_t path_cap)
+                     size_t path_cap, int *use_tls)
 {
     const char *p;
     const char *host_start;
     const char *path_start;
     char portbuf[16];
-    if (strncmp(url, "ws://", 5) != 0) {
-        return -1; /* only ws:// */
+    int tls = 0;
+    int default_port = 80;
+
+    if (strncmp(url, "ws://", 5) == 0) {
+        p = url + 5;
+        tls = 0;
+        default_port = 80;
+    } else if (strncmp(url, "wss://", 6) == 0) {
+#ifndef RTW_HAS_OPENSSL
+        return -1;
+#else
+        p = url + 6;
+        tls = 1;
+        default_port = 443;
+#endif
+    } else {
+        return -1;
     }
-    p = url + 5;
+
     host_start = p;
     path_start = strchr(p, '/');
     if (!path_start) {
@@ -54,20 +96,45 @@ static int parse_url(const char *url, char *host, size_t host_cap, int *port, ch
         colon = strrchr(hostport, ':');
         if (colon) {
             size_t hlen = (size_t)(colon - hostport);
-            if (hlen >= host_cap) return -1;
+            if (hlen >= host_cap) {
+                return -1;
+            }
             memcpy(host, hostport, hlen);
             host[hlen] = '\0';
             snprintf(portbuf, sizeof(portbuf), "%s", colon + 1);
             *port = atoi(portbuf);
         } else {
             snprintf(host, host_cap, "%s", hostport);
-            *port = 80;
+            *port = default_port;
         }
     }
+    *use_tls = tls;
     return 0;
 }
 
-static int http_handshake(int fd, const char *host, int port, const char *path)
+static ssize_t io_write(rtw_ws_client_t *c, const void *buf, size_t len)
+{
+#ifdef RTW_HAS_OPENSSL
+    if (c->use_tls && c->ssl) {
+        int n = SSL_write(c->ssl, buf, (int)len);
+        return n;
+    }
+#endif
+    return send(c->fd, buf, len, 0);
+}
+
+static ssize_t io_read(rtw_ws_client_t *c, void *buf, size_t len)
+{
+#ifdef RTW_HAS_OPENSSL
+    if (c->use_tls && c->ssl) {
+        int n = SSL_read(c->ssl, buf, (int)len);
+        return n;
+    }
+#endif
+    return recv(c->fd, buf, len, 0);
+}
+
+static int http_handshake(rtw_ws_client_t *c, const char *host, int port, const char *path)
 {
     char req[1024];
     char buf[2048];
@@ -82,11 +149,11 @@ static int http_handshake(int fd, const char *host, int port, const char *path)
              "Sec-WebSocket-Version: 13\r\n"
              "\r\n",
              path, host, port);
-    if (send(fd, req, strlen(req), 0) < 0) {
+    if (io_write(c, req, strlen(req)) < 0) {
         return -1;
     }
     while (nread < sizeof(buf) - 1) {
-        n = (int)recv(fd, buf + nread, sizeof(buf) - 1 - nread, 0);
+        n = (int)io_read(c, buf + nread, sizeof(buf) - 1 - nread);
         if (n <= 0) {
             return -1;
         }
@@ -121,16 +188,49 @@ static void mask_key(uint8_t key[4])
     }
 }
 
+#ifdef RTW_HAS_OPENSSL
+static int tls_setup(rtw_ws_client_t *c, const char *host)
+{
+    const SSL_METHOD *method;
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    method = TLS_client_method();
+    c->ssl_ctx = SSL_CTX_new(method);
+    if (!c->ssl_ctx) {
+        return -1;
+    }
+    if (!tls_insecure_enabled()) {
+        SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_PEER, NULL);
+        SSL_CTX_set_default_verify_paths(c->ssl_ctx);
+    } else {
+        SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_NONE, NULL);
+    }
+    c->ssl = SSL_new(c->ssl_ctx);
+    if (!c->ssl) {
+        return -1;
+    }
+    SSL_set_fd(c->ssl, c->fd);
+    SSL_set_tlsext_host_name(c->ssl, host);
+    if (SSL_connect(c->ssl) != 1) {
+        return -1;
+    }
+    return 0;
+}
+#endif
+
 rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
                                 rtw_ws_on_close_fn on_close, void *userdata)
 {
     char host[256], path[512];
     int port = 80;
+    int use_tls = 0;
     struct addrinfo hints, *res = NULL, *rp;
     char portstr[16];
     int fd = -1;
     rtw_ws_client_t *c;
-    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path)) != 0) {
+
+    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls) != 0) {
         return NULL;
     }
     memset(&hints, 0, sizeof(hints));
@@ -142,8 +242,12 @@ rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
     }
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+        if (fd < 0) {
+            continue;
+        }
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
         close(fd);
         fd = -1;
     }
@@ -151,16 +255,14 @@ rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
     if (fd < 0) {
         return NULL;
     }
-    if (http_handshake(fd, host, port, path) != 0) {
-        close(fd);
-        return NULL;
-    }
+
     c = (rtw_ws_client_t *)calloc(1, sizeof(*c));
     if (!c) {
         close(fd);
         return NULL;
     }
     c->fd = fd;
+    c->use_tls = use_tls;
     c->on_text = on_text;
     c->on_close = on_close;
     c->userdata = userdata;
@@ -171,12 +273,41 @@ rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
         free(c);
         return NULL;
     }
+
+#ifdef RTW_HAS_OPENSSL
+    if (use_tls) {
+        if (tls_setup(c, host) != 0) {
+            rtw_ws_close(c);
+            return NULL;
+        }
+    }
+#else
+    (void)use_tls;
+#endif
+
+    if (http_handshake(c, host, port, path) != 0) {
+        rtw_ws_close(c);
+        return NULL;
+    }
     return c;
 }
 
 void rtw_ws_close(rtw_ws_client_t *c)
 {
-    if (!c) return;
+    if (!c) {
+        return;
+    }
+#ifdef RTW_HAS_OPENSSL
+    if (c->ssl) {
+        SSL_shutdown(c->ssl);
+        SSL_free(c->ssl);
+        c->ssl = NULL;
+    }
+    if (c->ssl_ctx) {
+        SSL_CTX_free(c->ssl_ctx);
+        c->ssl_ctx = NULL;
+    }
+#endif
     if (c->fd >= 0) {
         close(c->fd);
         c->fd = -1;
@@ -193,9 +324,11 @@ int rtw_ws_send_text(rtw_ws_client_t *c, const char *text, size_t len)
     size_t hdr_len;
     size_t i;
     ssize_t n;
-    if (!c || c->fd < 0 || !text) return -1;
+    if (!c || c->fd < 0 || !text) {
+        return -1;
+    }
     mask_key(key);
-    hdr[0] = 0x81; /* FIN + text */
+    hdr[0] = 0x81;
     if (len < 126) {
         hdr[1] = (uint8_t)(0x80 | len);
         hdr_len = 2;
@@ -210,12 +343,14 @@ int rtw_ws_send_text(rtw_ws_client_t *c, const char *text, size_t len)
     memcpy(hdr + hdr_len, key, 4);
     hdr_len += 4;
     frame = (uint8_t *)malloc(hdr_len + len);
-    if (!frame) return -1;
+    if (!frame) {
+        return -1;
+    }
     memcpy(frame, hdr, hdr_len);
     for (i = 0; i < len; i++) {
         frame[hdr_len + i] = (uint8_t)text[i] ^ key[i % 4];
     }
-    n = send(c->fd, frame, hdr_len + len, 0);
+    n = io_write(c, frame, hdr_len + len);
     free(frame);
     return n < 0 ? -1 : 0;
 }
@@ -223,9 +358,13 @@ int rtw_ws_send_text(rtw_ws_client_t *c, const char *text, size_t len)
 static int ensure_rx_cap(rtw_ws_client_t *c, size_t need)
 {
     uint8_t *nbuf;
-    if (need <= c->rx_cap) return 0;
+    if (need <= c->rx_cap) {
+        return 0;
+    }
     nbuf = (uint8_t *)realloc(c->rx, need);
-    if (!nbuf) return -1;
+    if (!nbuf) {
+        return -1;
+    }
     c->rx = nbuf;
     c->rx_cap = need;
     return 0;
@@ -234,7 +373,6 @@ static int ensure_rx_cap(rtw_ws_client_t *c, size_t need)
 static int process_frames(rtw_ws_client_t *c)
 {
     while (c->rx_len >= 2) {
-        size_t i = 0;
         uint8_t b0 = c->rx[0];
         uint8_t b1 = c->rx[1];
         int opcode = b0 & 0x0F;
@@ -243,42 +381,51 @@ static int process_frames(rtw_ws_client_t *c)
         size_t hdr = 2;
         uint8_t mask[4] = {0};
         if (plen == 126) {
-            if (c->rx_len < 4) return 0;
+            if (c->rx_len < 4) {
+                return 0;
+            }
             plen = ((uint64_t)c->rx[2] << 8) | c->rx[3];
             hdr = 4;
         } else if (plen == 127) {
-            return -1; /* oversized */
+            return -1;
         }
         if (masked) {
-            if (c->rx_len < hdr + 4) return 0;
+            if (c->rx_len < hdr + 4) {
+                return 0;
+            }
             memcpy(mask, c->rx + hdr, 4);
             hdr += 4;
         }
-        if (c->rx_len < hdr + plen) return 0;
+        if (c->rx_len < hdr + plen) {
+            return 0;
+        }
         {
             uint8_t *payload = c->rx + hdr;
             size_t j;
             if (masked) {
-                for (j = 0; j < plen; j++) payload[j] ^= mask[j % 4];
+                for (j = 0; j < plen; j++) {
+                    payload[j] ^= mask[j % 4];
+                }
             }
-            if (opcode == 0x1) { /* text */
+            if (opcode == 0x1) {
                 char *text = (char *)malloc(plen + 1);
                 if (text) {
                     memcpy(text, payload, plen);
                     text[plen] = '\0';
-                    if (c->on_text) c->on_text(c->userdata, text, (size_t)plen);
+                    if (c->on_text) {
+                        c->on_text(c->userdata, text, (size_t)plen);
+                    }
                     free(text);
                 }
             } else if (opcode == 0x8) {
                 c->closed = 1;
-                if (c->on_close) c->on_close(c->userdata, 1000);
+                if (c->on_close) {
+                    c->on_close(c->userdata, 1000);
+                }
                 return -1;
-            } else if (opcode == 0x9) { /* ping -> pong */
-                /* ignore for MVP */
             }
             memmove(c->rx, c->rx + hdr + plen, c->rx_len - hdr - plen);
             c->rx_len -= hdr + plen;
-            (void)i;
         }
     }
     return 0;
@@ -289,17 +436,27 @@ int rtw_ws_poll(rtw_ws_client_t *c, int timeout_ms)
     struct pollfd pfd;
     int pr;
     ssize_t n;
-    if (!c || c->fd < 0 || c->closed) return -1;
+    if (!c || c->fd < 0 || c->closed) {
+        return -1;
+    }
     pfd.fd = c->fd;
     pfd.events = POLLIN;
     pr = poll(&pfd, 1, timeout_ms);
-    if (pr < 0) return -1;
-    if (pr == 0) return 0;
-    if (ensure_rx_cap(c, c->rx_len + 8192) != 0) return -1;
-    n = recv(c->fd, c->rx + c->rx_len, c->rx_cap - c->rx_len, 0);
+    if (pr < 0) {
+        return -1;
+    }
+    if (pr == 0) {
+        return 0;
+    }
+    if (ensure_rx_cap(c, c->rx_len + 8192) != 0) {
+        return -1;
+    }
+    n = io_read(c, c->rx + c->rx_len, c->rx_cap - c->rx_len);
     if (n <= 0) {
         c->closed = 1;
-        if (c->on_close) c->on_close(c->userdata, 1006);
+        if (c->on_close) {
+            c->on_close(c->userdata, 1006);
+        }
         return -1;
     }
     c->rx_len += (size_t)n;
@@ -309,4 +466,9 @@ int rtw_ws_poll(rtw_ws_client_t *c, int timeout_ms)
 int rtw_ws_fd(const rtw_ws_client_t *c)
 {
     return c ? c->fd : -1;
+}
+
+int rtw_ws_is_tls(const rtw_ws_client_t *c)
+{
+    return c ? c->use_tls : 0;
 }

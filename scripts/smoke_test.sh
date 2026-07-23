@@ -33,4 +33,7 @@ sleep 0.5
 echo "== mod harness =="
 ./scripts/mod_harness_test.sh
 
+echo "== wss smoke =="
+./scripts/wss_smoke_test.sh
+
 echo "ALL SMOKE PASSED"

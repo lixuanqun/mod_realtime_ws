@@ -106,6 +106,14 @@ static void test_session_uplink_and_clear(void)
     RTW_CHECK(strcmp(ev.mark_name, "utt1") == 0);
     free(json);
 
+    RTW_CHECK(rtw_session_rehandshake(&s) == 0);
+    RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
+    RTW_CHECK(strstr(json, "connected"));
+    free(json);
+    RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
+    RTW_CHECK(strstr(json, "start"));
+    free(json);
+
     RTW_CHECK(rtw_session_stop(&s) == 0);
     RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
     RTW_CHECK(strstr(json, "stop"));

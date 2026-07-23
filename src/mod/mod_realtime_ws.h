@@ -30,6 +30,11 @@
 #define RTW_EVENT_ERROR "mod_realtime_ws::error"
 #define RTW_EVENT_JSON "mod_realtime_ws::json"
 
+typedef enum {
+    RTW_INJECT_REPLACE = 0, /* replace frame when playout has data; else passthrough */
+    RTW_INJECT_MIX = 1      /* soft-mix agent audio into existing write frame */
+} rtw_inject_mode_t;
+
 typedef struct rtw_tech_private {
     switch_mutex_t *mutex;
     char session_id[RTW_MAX_SID];
@@ -50,6 +55,13 @@ typedef struct rtw_tech_private {
     /* leftover PCM samples when frame size != 160 */
     int16_t pcm_hold[320];
     size_t pcm_hold_len;
+    /* inject / reconnect / record policy */
+    rtw_inject_mode_t inject_mode;
+    int reconnect_enabled;
+    int reconnect_max;
+    int reconnect_attempts;
+    uint64_t reconnect_ok;
+    int record_injected; /* 1 = WRITE_REPLACE audio expected in record_session path */
 } rtw_tech_t;
 
 /* Bridge API used by module + harness (no proprietary audio_stream code). */
@@ -63,8 +75,14 @@ switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name);
 /* Media-bug READ path: feed L16 PCM (mono interleaved). */
 switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, size_t nsamples);
 
-/* Media-bug WRITE path: fill buffer with mulaw/L16 for inject; returns samples written. */
+/* Media-bug WRITE path: fill buffer with L16 for inject; returns samples written. */
 size_t rtw_bridge_on_write_pcm16(rtw_tech_t *tech, int16_t *out, size_t max_samples);
+
+/*
+ * WRITE_REPLACE helper: mutate inout_pcm in place.
+ * Returns samples taken from playout (0 = passthrough left unchanged for REPLACE mode).
+ */
+size_t rtw_bridge_apply_write_frame(rtw_tech_t *tech, int16_t *inout_pcm, size_t nsamples);
 
 int rtw_validate_ws_uri(const char *url, char *out, size_t out_cap);
 

@@ -186,3 +186,21 @@ int rtw_session_stop(rtw_session_t *s)
     s->state = RTW_STATE_STOPPED;
     return 0;
 }
+
+int rtw_session_rehandshake(rtw_session_t *s)
+{
+    char *connected;
+    char *start;
+    if (!s || s->state != RTW_STATE_RUNNING) {
+        return -1;
+    }
+    connected = rtw_build_connected("1.0.0");
+    if (enqueue_json(s, connected) != 0) {
+        return -1;
+    }
+    start = rtw_build_start(s->stream_sid, s->account_sid, s->call_sid, NULL, s->seq++);
+    if (enqueue_json(s, start) != 0) {
+        return -1;
+    }
+    return 0;
+}
