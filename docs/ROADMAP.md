@@ -23,7 +23,9 @@ Dates are intentionally omitted; order is by dependency risk.
 - [x] Study mod_audio_stream public patterns — MIT bridge + media-bug layout (`rtw_bridge`, `rtw_tech_t`)
 - [x] Stub harness self-test (`make harness` / `./scripts/mod_harness_test.sh`) — duplex + clear without libfreeswitch
 - [x] Out-of-tree build recipe (`Makefile.fs`, `scripts/build-mod-realtime-ws.sh`)
+- [x] Design review fixes: media-thread no WS I/O, idempotent stop, `ws://`-only validate, CA/MZ SIDs, metadata `{…}` parse
 - [ ] Link/run `.so` on real FreeSWITCH 1.10.x + complete WRITE_REPLACE inject
+- [ ] `wss://` TLS client (required before production)
 - [ ] Lua dialplan live on FS (example drafted in `conf/dialplan_example.lua`)
 - [ ] Side-by-side parity notes: audio_stream vs realtime_ws (features, latency, license)
 

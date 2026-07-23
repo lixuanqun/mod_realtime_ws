@@ -1,16 +1,24 @@
 #include "mod_realtime_ws.h"
 #include "rtw_mulaw.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+/*
+ * Thread contract (see docs/ARCHITECTURE.md §7):
+ * - Media-bug paths (on_read / on_write): mutate session under mutex, NEVER WS I/O.
+ * - WS worker: poll + flush_outbound (only place that sends).
+ * - on_ws_text runs inside worker poll → may flush.
+ */
+
 static void flush_outbound(rtw_tech_t *tech)
 {
     char *json;
     while (rtw_session_pop_outbound(&tech->session, &json) == 0) {
-        if (tech->ws) {
+        if (tech->ws && tech->ws_ready) {
             rtw_ws_send_text(tech->ws, json, strlen(json));
         }
         free(json);
@@ -21,7 +29,7 @@ static void on_ws_text(void *userdata, const char *text, size_t len)
 {
     rtw_tech_t *tech = (rtw_tech_t *)userdata;
     (void)len;
-    if (!tech || tech->close_requested) {
+    if (!tech || tech->close_requested || tech->cleanup_started) {
         return;
     }
     if (switch_mutex_lock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
@@ -44,9 +52,10 @@ static void on_ws_close(void *userdata, int code)
 static void *ws_worker(void *arg)
 {
     rtw_tech_t *tech = (rtw_tech_t *)arg;
-    while (tech && !tech->close_requested) {
+    while (tech && !tech->close_requested && !tech->cleanup_started) {
         if (tech->ws) {
             if (rtw_ws_poll(tech->ws, 20) < 0) {
+                tech->ws_ready = 0;
                 break;
             }
         } else {
@@ -65,32 +74,66 @@ int rtw_validate_ws_uri(const char *url, char *out, size_t out_cap)
     if (!url || !out || out_cap < 8) {
         return 0;
     }
-    if (strncmp(url, "ws://", 5) != 0 && strncmp(url, "wss://", 6) != 0) {
+    /* L0 client currently supports plain ws:// only (no TLS yet). Reject wss://
+     * loudly so operators do not think TLS is on. */
+    if (strncmp(url, "ws://", 5) != 0) {
+        return 0;
+    }
+    if (strlen(url) >= out_cap) {
         return 0;
     }
     snprintf(out, out_cap, "%s", url);
     return 1;
 }
 
-static void make_stream_sid(char *out, size_t cap, const char *uuid)
+static void hex_compact(const char *uuid, char *out, size_t out_cap, size_t want)
 {
-    /* Twilio-like MZ + hex-ish from uuid bytes (not crypto). */
-    char compact[64];
     size_t i, j = 0;
-    memset(compact, 0, sizeof(compact));
+    if (!out || out_cap == 0) {
+        return;
+    }
+    memset(out, 0, out_cap);
     if (uuid) {
-        for (i = 0; uuid[i] && j + 1 < sizeof(compact); i++) {
+        for (i = 0; uuid[i] && j + 1 < out_cap && j < want; i++) {
             char c = uuid[i];
-            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-                compact[j++] = c;
+            if (isxdigit((unsigned char)c)) {
+                out[j++] = (char)tolower((unsigned char)c);
             }
         }
     }
-    while (j < 32) {
-        compact[j++] = '0';
+    while (j < want && j + 1 < out_cap) {
+        out[j++] = '0';
     }
-    compact[32] = '\0';
+    out[j < out_cap ? j : out_cap - 1] = '\0';
+}
+
+static void make_stream_sid(char *out, size_t cap, const char *uuid)
+{
+    char compact[33];
+    hex_compact(uuid, compact, sizeof(compact), 32);
     snprintf(out, cap, "MZ%s", compact);
+}
+
+static void make_call_sid(char *out, size_t cap, const char *uuid)
+{
+    char compact[33];
+    hex_compact(uuid, compact, sizeof(compact), 32);
+    snprintf(out, cap, "CA%s", compact);
+}
+
+static int valid_mark_name(const char *name)
+{
+    size_t i;
+    if (!name || !name[0] || strlen(name) >= RTW_MARK_NAME_LEN) {
+        return 0;
+    }
+    for (i = 0; name[i]; i++) {
+        char c = name[i];
+        if (!(isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.')) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_uri, int sampling,
@@ -99,11 +142,11 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     rtw_tech_t *tech;
     const char *uuid;
     char sid[RTW_SID_MAX];
+    char call_sid[RTW_SID_MAX];
     if (!session || !ws_uri || !out_tech) {
         return SWITCH_STATUS_FALSE;
     }
     if (sampling != 8000 && sampling != 16000) {
-        /* L0 path currently packs as 8k mulaw; 16k allowed as source but we still target 8k wire for L0 */
         if (sampling % 8000 != 0) {
             return SWITCH_STATUS_FALSE;
         }
@@ -125,14 +168,16 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     tech->sampling = sampling > 0 ? sampling : 8000;
     tech->channels = channels > 0 ? channels : 1;
     make_stream_sid(sid, sizeof(sid), tech->session_id);
+    make_call_sid(call_sid, sizeof(call_sid), tech->session_id);
     snprintf(tech->stream_sid, sizeof(tech->stream_sid), "%s", sid);
+    snprintf(tech->call_sid, sizeof(tech->call_sid), "%s", call_sid);
 
     if (rtw_session_init(&tech->session, 256, 64 * 1024) != 0) {
         switch_mutex_destroy(tech->mutex);
         free(tech);
         return SWITCH_STATUS_FALSE;
     }
-    if (rtw_session_start(&tech->session, tech->stream_sid, tech->session_id, "ACmodrealtimews",
+    if (rtw_session_start(&tech->session, tech->stream_sid, tech->call_sid, "ACmodrealtimews000000000000000000",
                           tech->metadata[0] ? tech->metadata : NULL) != 0) {
         rtw_session_destroy(&tech->session);
         switch_mutex_destroy(tech->mutex);
@@ -148,6 +193,7 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
         return SWITCH_STATUS_FALSE;
     }
     tech->ws_ready = 1;
+    /* Startup handshake flush is allowed on the start thread before the worker runs. */
     flush_outbound(tech);
 
     if (pthread_create(&tech->worker, NULL, ws_worker, tech) != 0) {
@@ -169,12 +215,17 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
     if (!tech) {
         return SWITCH_STATUS_FALSE;
     }
+    /* Idempotent: media-bug CLOSE and explicit stop must both be safe. */
+    if (tech->cleanup_started) {
+        return SWITCH_STATUS_SUCCESS;
+    }
+    tech->cleanup_started = 1;
     tech->close_requested = 1;
     if (tech->worker_started) {
         pthread_join(tech->worker, NULL);
         tech->worker_started = 0;
     }
-    if (switch_mutex_lock(tech->mutex) == SWITCH_STATUS_SUCCESS) {
+    if (tech->mutex && switch_mutex_lock(tech->mutex) == SWITCH_STATUS_SUCCESS) {
         rtw_session_stop(&tech->session);
         flush_outbound(tech);
         switch_mutex_unlock(tech->mutex);
@@ -182,6 +233,7 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
     if (tech->ws) {
         rtw_ws_close(tech->ws);
         tech->ws = NULL;
+        tech->ws_ready = 0;
     }
     rtw_session_destroy(&tech->session);
     if (tech->mutex) {
@@ -194,18 +246,22 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
 
 switch_status_t rtw_bridge_pause(rtw_tech_t *tech, int pause)
 {
-    if (!tech) {
+    if (!tech || tech->cleanup_started) {
+        return SWITCH_STATUS_FALSE;
+    }
+    if (switch_mutex_lock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
         return SWITCH_STATUS_FALSE;
     }
     tech->audio_paused = pause ? 1 : 0;
     tech->session.paused = tech->audio_paused;
+    switch_mutex_unlock(tech->mutex);
     return SWITCH_STATUS_SUCCESS;
 }
 
 switch_status_t rtw_bridge_clear(rtw_tech_t *tech)
 {
     char json[128];
-    if (!tech) {
+    if (!tech || tech->cleanup_started) {
         return SWITCH_STATUS_FALSE;
     }
     snprintf(json, sizeof(json), "{\"event\":\"clear\",\"streamSid\":\"%s\"}", tech->stream_sid);
@@ -213,6 +269,8 @@ switch_status_t rtw_bridge_clear(rtw_tech_t *tech)
         return SWITCH_STATUS_FALSE;
     }
     rtw_session_handle_peer_json(&tech->session, json);
+    /* Local clear may enqueue mark ACKs; flush from this control path is OK
+     * (API/ESL thread, not media bug). */
     flush_outbound(tech);
     switch_mutex_unlock(tech->mutex);
     return SWITCH_STATUS_SUCCESS;
@@ -221,9 +279,11 @@ switch_status_t rtw_bridge_clear(rtw_tech_t *tech)
 switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name)
 {
     char json[256];
-    if (!tech || !name) {
+    if (!tech || !name || tech->cleanup_started || !valid_mark_name(name)) {
         return SWITCH_STATUS_FALSE;
     }
+    /* Operator/API mark: treat as peer mark (queued against playout) for testing
+     * barge-in / ACK paths. Not a Twilio wire event from FS→peer. */
     snprintf(json, sizeof(json),
              "{\"event\":\"mark\",\"streamSid\":\"%s\",\"mark\":{\"name\":\"%s\"}}", tech->stream_sid, name);
     if (switch_mutex_lock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
@@ -238,17 +298,16 @@ switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name)
 switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, size_t nsamples)
 {
     size_t i = 0;
-    if (!tech || !pcm || tech->close_requested || tech->audio_paused) {
+    if (!tech || !pcm || tech->close_requested || tech->cleanup_started || tech->audio_paused) {
         return SWITCH_TRUE;
     }
     if (switch_mutex_trylock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
         return SWITCH_TRUE;
     }
-    /* Append into hold then push 160-sample frames (8k L0). For 16k input, naive downsample by 2. */
+    /* Enqueue only — worker flushes WS. */
     while (i < nsamples) {
         int16_t sample = pcm[i++];
         if (tech->sampling == 16000) {
-            /* simple pair average if next available */
             if (i < nsamples) {
                 sample = (int16_t)(((int)sample + (int)pcm[i++]) / 2);
             }
@@ -259,7 +318,6 @@ switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, siz
         if (tech->pcm_hold_len >= 160) {
             rtw_session_push_pcm16(&tech->session, tech->pcm_hold, 160);
             tech->pcm_hold_len = 0;
-            flush_outbound(tech);
         }
     }
     switch_mutex_unlock(tech->mutex);
@@ -270,18 +328,19 @@ size_t rtw_bridge_on_write_pcm16(rtw_tech_t *tech, int16_t *out, size_t max_samp
 {
     uint8_t mulaw[640];
     size_t n;
-    if (!tech || !out || max_samples == 0) {
+    size_t want;
+    if (!tech || !out || max_samples == 0 || tech->cleanup_started) {
         return 0;
     }
     if (switch_mutex_trylock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
         return 0;
     }
-    n = rtw_session_read_playout(&tech->session, mulaw,
-                                 max_samples < sizeof(mulaw) ? max_samples : sizeof(mulaw));
+    want = max_samples < sizeof(mulaw) ? max_samples : sizeof(mulaw);
+    n = rtw_session_read_playout(&tech->session, mulaw, want);
     if (n > 0) {
         rtw_mulaw_to_pcm16(mulaw, n, out);
     }
-    flush_outbound(tech); /* mark completions */
+    /* Mark ACKs stay queued until the WS worker flushes — no I/O here. */
     switch_mutex_unlock(tech->mutex);
     return n;
 }

@@ -40,6 +40,7 @@ See `conf/dialplan_example.lua` for Lua/ESL lifecycle (prefer over `${api(...)}`
 
 ### Still pending on real FS
 
-- Full `WRITE_REPLACE` frame publish into the call leg (callback stubbed pending link against real headers)
-- `wss://` (TLS) client
+- Full `WRITE_REPLACE` frame publish into the call leg
+- `wss://` (TLS) client — validator currently **rejects** `wss://` on purpose
 - Record-session interaction flag
+- Session-pool allocation for `rtw_tech_t` (today: `calloc`)

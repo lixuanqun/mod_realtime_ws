@@ -42,6 +42,18 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
+    /* Guard rails covered by design review fixes */
+    {
+        char tmp[64];
+        if (rtw_validate_ws_uri("wss://example/media", tmp, sizeof(tmp))) {
+            fprintf(stderr, "harness: wss should be rejected until TLS\n");
+            return 1;
+        }
+        if (!rtw_validate_ws_uri("ws://127.0.0.1:9/x", tmp, sizeof(tmp))) {
+            fprintf(stderr, "harness: ws:// should be accepted\n");
+            return 1;
+        }
+    }
     if (seconds < 1) {
         seconds = 1;
     }

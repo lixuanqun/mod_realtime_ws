@@ -188,12 +188,26 @@ Flushes playout queue; outstanding marks are acknowledged per Twilio semantics.
 
 Twilio bidirectional streams only fork **inbound** toward the app. L0 bidirectional mode follows that default (`tracks: ["inbound"]`). Forking mixed/outbound is an **extension** for unidirectional analytics use cases.
 
-## Test vectors (to be added under `tests/protocol/`)
+## Documented deltas vs Twilio (L0)
 
-1. Golden JSON samples for each event (fixtures).
-2. Interop: Node consumer from [twilio/media-streams](https://github.com/twilio/media-streams) against a mock producer.
-3. Clear mid-playback: assert silence within N ms and mark flush.
+Consumers written for Twilio Media Streams should only need to account for:
+
+| Topic | Twilio | mod_realtime_ws |
+|-------|--------|-----------------|
+| Transport | `wss://` from Twilio | **`ws://` only today**; `wss://` rejected until TLS lands |
+| `streamSid` | Twilio-assigned `MZ…` | Generated `MZ` + 32 hex from channel UUID |
+| `callSid` | Twilio `CA…` | `CA` + 32 hex derived from channel UUID |
+| `accountSid` | Real account | Configurable placeholder (`ACmodrealtimews…` default) |
+| `connected` extras | — | Optional `mod_realtime_ws` capability object (ignored by strict parsers) |
+| Auth | Twilio signatures | Gateway-defined (URL token / metadata); no Twilio signature |
+
+## Test vectors
+
+1. Golden JSON samples for each event (`tests/protocol/fixtures/`).
+2. Interop: Node consumer against producer (`examples/node-mock-server`, `rtw_sim`, harness).
+3. Clear mid-playback: assert silence and mark flush.
 4. Invalid `streamSid` media: assert no playout.
+5. URI validation: `wss://` rejected; `ws://` accepted.
 
 ## License note on “protocol”
 

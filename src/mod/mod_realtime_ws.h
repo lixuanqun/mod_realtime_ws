@@ -34,13 +34,14 @@ typedef struct rtw_tech_private {
     switch_mutex_t *mutex;
     char session_id[RTW_MAX_SID];
     char stream_sid[RTW_SID_MAX];
+    char call_sid[RTW_SID_MAX];
     char ws_uri[RTW_MAX_WS_URI];
     char metadata[RTW_MAX_META];
-    int sampling; /* target rate to peer; L0 uses 8000 */
+    int sampling; /* source rate from FS; L0 wire is always 8k mulaw */
     int channels;
     int audio_paused;
     int close_requested;
-    int cleanup_started;
+    int cleanup_started; /* idempotent stop / CLOSE */
     int ws_ready;
     rtw_session_t session;
     rtw_ws_client_t *ws;

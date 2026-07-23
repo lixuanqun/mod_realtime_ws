@@ -22,35 +22,35 @@
 | Media bug as the tap point | Correct place to fork RTP without replacing the SIP path |
 | Uplink continuous while downlink plays independently | True full-duplex Voice Agent |
 | Resample at the module edge | External peers see a stable rate (8k/16k/…) |
-| Dedicated WS I/O path (e.g. libwsc-class lightweight client) | Avoid blocking the FS media thread |
-| Hard problems called out for commercial tier: session lifetime, thread-safe inject/shutdown, bounded memory, record interaction | These are **acceptance criteria for our MIT open build**, not paid extras |
+| Dedicated WS I/O path | Avoid blocking the FS media thread |
+| Session lifetime, thread-safe inject/shutdown, bounded memory, record interaction | **Acceptance criteria for our MIT open build**, not paid extras |
 | API style `uuid_* start/stop` + metadata | Familiar to operators already using audio_stream |
 
 #### Where mod_audio_stream falls short (our opportunity)
 
 | Gap | Our answer |
 |-----|------------|
-| Community edition primarily **uni-directional**; full duplex / auto-playback concentrated in **commercial** builds (channel caps) | **MIT, full duplex + mark/clear in open core** — no 10-channel tax for the capability itself |
-| Wire protocol is **module-private** (L16 binary / ad-hoc JSON playback), not Twilio-shaped | **Twilio Media Streams L0 dialect** so existing bots/bridges port with minimal change |
-| No first-class public **`mark` / `clear`** semantics aligned with Twilio barge-in | Native playout queue + `clear` flush + mark ACK (already in `rtw_playout` / `rtw_session`) |
-| Bidirectional reliability historically uneven; many tutorials fall back to ESL `uuid_broadcast` | Single WS path for up+down; clear latency is a measured SLO |
-| Vendor AI adapters tend to creep toward the module | **Thin mod + Gateway** — module never embeds OpenAI/Gemini/阿里云 SDKs |
-| Multi-sink / analytics+agent on one call | Roadmap **L2 multi-sink** (beyond Twilio’s one bi-di stream/call limit) |
-| Server-mode / NAT-friendly listen | Roadmap **WS server mode** in addition to client dial-out |
-| Observability mostly logs | Explicit metrics: queue depth, drops, clear latency, mark RTT |
+| Community edition primarily **uni-directional**; full duplex concentrated in **commercial** builds | **MIT, full duplex + mark/clear in open core** |
+| Wire protocol is **module-private**, not Twilio-shaped | **Twilio Media Streams L0 dialect** |
+| No first-class public **`mark` / `clear`** | Native playout queue + `clear` flush + mark ACK |
+| Vendor AI adapters creep toward the module | **Thin mod + Gateway** |
+| Multi-sink / server-mode | Roadmap L2 / WS server mode |
+| Observability mostly logs | Explicit metrics (queue depth, drops, clear latency, mark RTT) |
 
 #### Surpass checklist (must be true before calling v1 “done”)
 
-1. **Open duplex**: start→uplink media + downlink media + `clear` without commercial binary.
-2. **Twilio L0 interop**: a consumer written for Twilio Media Streams can talk to FS with documented deltas only.
-3. **FS-correct lifecycle**: hangup/transfer/park safe; no use-after-free; media bug not tied to ephemeral `${api(...)}`.
-4. **Thread contract**: bug callback = enqueue only; WS/resample on workers.
-5. **Bounded memory**: drop-oldest under backpressure; documented limits.
-6. **Record policy**: explicit flag whether injected audio enters `record_session`.
-7. **Measurable barge-in**: `clear` → audible stop within target P95 (see observability).
-8. **License clarity**: MIT for the whole shipping module path used in production duplex.
+| # | Requirement | Status |
+|---|-------------|--------|
+| 1 | **Open duplex** + `clear` without commercial binary | Core + stub harness ✅; live FS WRITE_REPLACE ⏳ |
+| 2 | **Twilio L0 interop** with documented deltas only | L0 events ✅; see PROTOCOL deltas |
+| 3 | **FS-correct lifecycle** (hangup/transfer safe, no UAF) | Idempotent `cleanup_started` ✅; live FS soak ⏳ |
+| 4 | **Thread contract**: bug = enqueue only; WS on worker | Enforced in `rtw_bridge` ✅ |
+| 5 | **Bounded memory** drop-oldest | Outbound queue ✅ |
+| 6 | **Record policy** flag for injected audio | Not started ⏳ |
+| 7 | **Measurable barge-in** clear→audible stop P95 | Counter only; latency SLO ⏳ |
+| 8 | **MIT** for production duplex path | ✅ |
 
-Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_stream), [v1.0.3 bi-directional notes](https://github.com/amigniter/mod_audio_stream/releases/tag/v1.0.3).
+Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_stream).
 
 ## 2. High-level diagram
 
@@ -65,7 +65,7 @@ Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_s
                                  │  │  • Twilio dialect serializer   │  │
                                  │  └──────────────┬─────────────────┘  │
                                  └─────────────────┼────────────────────┘
-                                                   │ WSS
+                                                   │ WS (wss later)
                                                    ▼
                                  ┌──────────────────────────────────────┐
                                  │     Your app / Media Gateway         │
@@ -79,18 +79,19 @@ Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_s
 
 | Layer | Owns | Does not own |
 |-------|------|--------------|
-| **mod_realtime_ws** | Session lifecycle, media bug, WS I/O, encode/decode for wire format, playout buffer, `mark`/`clear` | LLM prompts, vendor SDKs, business IVR logic |
-| **Gateway / bot** | Vendor adapters, dialogue, VAD strategy, generation cancel | FreeSWITCH channel internals |
-| **Dialplan / Lua / ESL** | When to `start`/`stop` stream, metadata | Audio framing |
+| **mod_realtime_ws** | Session lifecycle, media bug, WS I/O, encode/decode, playout, `mark`/`clear` | LLM prompts, vendor SDKs, IVR logic |
+| **Gateway / bot** | Vendor adapters, dialogue, VAD, generation cancel | FreeSWITCH channel internals |
+| **Dialplan / Lua / ESL** | When to `start`/`stop`, metadata | Audio framing |
 
 ## 4. Connection modes (roadmap)
 
 | Mode | Description | v1 |
 |------|-------------|----|
-| **Client** | Module dials out to `wss://` | Required |
-| **Server** | External peer connects into FS (or local sidecar) | Later |
-| **Strict Twilio** | mulaw/8000 + JSON base64 media | Required |
-| **Extended** | L16 binary, negotiated rates, multi-sink | Optional flags |
+| **Client `ws://`** | Module dials out (dev/lab) | Required now |
+| **Client `wss://`** | TLS dial-out | Required before production |
+| **Server** | Peer connects in | Later |
+| **Strict Twilio** | mulaw/8000 + JSON base64 | Required |
+| **Extended** | L16, negotiated rates, multi-sink | Optional flags |
 
 ## 5. Internal pipeline
 
@@ -98,86 +99,112 @@ Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_s
 
 ```text
 RTP read → media bug → (optional mix) → resample → frame pack (~20ms)
-        → encode (mulaw + base64 in strict mode) → send queue → WS write
+        → encode (mulaw + base64) → outbound queue → WS worker write
 ```
 
 ### Downlink (WebSocket → call)
 
 ```text
-WS read → parse JSON control / media
-       → decode payload → playout ring buffer
-       → media bug write (replace or soft-mix)
-       → RTP write
+WS worker read → parse JSON → decode → playout ring
+              → media bug WRITE_REPLACE → RTP write
 ```
 
 ### Barge-in
 
-1. Peer sends `{"event":"clear","streamSid":"..."}`.
-2. Module empties playout buffer **immediately**.
-3. Pending `mark` names are echoed back as completed/cleared (Twilio semantics).
-4. Gateway must also cancel upstream TTS/S2S generation (application responsibility).
+1. Peer (or local API) issues `clear`.
+2. Module empties playout **immediately**.
+3. Pending `mark` names are ACK'd (Twilio semantics).
+4. Gateway must also cancel TTS/S2S (application responsibility).
 
-## 6. API sketch (draft, not frozen)
+## 6. API
 
 ```text
-uuid_realtime_ws <uuid> start <wss-url> <mix-type> <rate> [metadata-json]
-uuid_realtime_ws <uuid> stop [bugname]
+uuid_realtime_ws <uuid> start <ws-url> <mix-type> <rate> [{metadata-json}]
+uuid_realtime_ws <uuid> stop
 uuid_realtime_ws <uuid> pause | resume
 uuid_realtime_ws <uuid> clear
 uuid_realtime_ws <uuid> send_mark <name>
 ```
 
-`mix-type`: `mono` | `mixed` | `stereo` (Twilio bidirectional typically exposes inbound only; we still support fork mix types for unidirectional / extended modes).
+- `mix-type`: `mono` | `mixed` | `stereo`
+- Metadata: optional JSON object; parser takes from the first `{` so spaces inside JSON are allowed.
+- `send_mark`: **local/test** helper — queues a peer-style mark against playout (not an FS→peer wire event).
+- **Lifecycle:** prefer Lua/ESL over ephemeral `${api(...)}` so the bug outlives the dialplan step.
 
-**Lifecycle rule:** do not start the bug via short-lived synchronous `${api(...)}` expansion alone; prefer Lua or ESL so the bug outlives the dialplan step (known FreeSWITCH pitfall).
+## 7. Threading & safety (MUST)
 
-## 7. Threading & safety (design constraints)
+| Context | Allowed | Forbidden |
+|---------|---------|-----------|
+| Media-bug READ/WRITE | `trylock` → enqueue / playout read | Any `send`/`recv`/connect |
+| WS worker | `poll`, `flush_outbound`, handle peer JSON | Blocking forever without `close_requested` check |
+| API/ESL (`clear`/`stop`) | Lock + session mutate; flush OK | Holding channel locks across network |
 
-- Media bug callback: **enqueue only** (no network I/O).
-- Dedicated worker(s) for WS read/write and resample.
-- Bounded queues with drop-oldest + metrics under backpressure.
-- Channel hangup / transfer / park must detach cleanly (no use-after-free).
-- Interaction with `record_session` / `uuid_record` must be explicit (config flag: whether injected audio is recorded).
+Additional rules:
+
+- `rtw_bridge_stop` is **idempotent** (`cleanup_started`) so `do_stop` and `SWITCH_ABC_TYPE_CLOSE` cannot double-free.
+- Hangup/transfer/park must detach cleanly.
+- Bounded outbound queue: drop-oldest + `drops` counter.
+- `record_session` interaction: explicit future config flag.
 
 ## 8. Observability
 
-Expose counters/histograms (log and/or stats interface):
+Expose (log and/or stats):
 
-- uplink/downlink frame rates, queue depth, drop counts
+- uplink/downlink frames, queue depth, drops
 - WS connect/fail/reconnect
 - `clear` latency (command → buffer empty)
-- mark round-trip
+- mark RTT
 
 ## 9. Comparison
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| **MRCP** | Standard ASR/TTS control | Poor fit for LLM/S2S; heavy SIP+RTP stack |
-| **mod_audio_stream** | Proven media-bug fork; mature duplex in commercial builds | Private wire format; duplex/gated features; not Twilio-shaped |
-| **mod_realtime_ws** (this) | Same media-bug foundation **plus** Twilio L0, open duplex, mark/clear, MIT, gateway split | Live FS WRITE_REPLACE inject still pending on hosts with `libfreeswitch-dev` |
+| **MRCP** | Standard ASR/TTS | Poor LLM/S2S fit |
+| **mod_audio_stream** | Proven media-bug fork; mature duplex commercially | Private wire; duplex gated; not Twilio-shaped |
+| **mod_realtime_ws** | Twilio L0, open duplex, mark/clear, MIT, gateway split | Live FS WRITE_REPLACE + `wss://` still pending |
 
-**Rule of thumb:** if `mod_audio_stream` solved a hard FS problem (lifetime, inject races, record sync), we study that class of fix — then implement it openly and attach Twilio-compatible control semantics on top.
-
-## 10. Repository layout (target)
+## 10. Repository layout
 
 ```text
 mod_realtime_ws/
-├── README.md
-├── LICENSE                 # MIT
-├── CONTRIBUTING.md
-├── docs/
-│   ├── ARCHITECTURE.md     # this file
-│   ├── PROTOCOL.md
-│   └── ROADMAP.md
-├── src/                    # C module (later)
-├── conf/                   # sample dialplan / autoload (later)
-├── tests/                  # protocol fixtures (later)
-└── examples/               # Node/Python consumer stubs (later)
+├── README.md, LICENSE, CONTRIBUTING.md, Makefile, Makefile.fs
+├── docs/           ARCHITECTURE, PROTOCOL, ROADMAP, BUILD_FS
+├── src/core/       portable Twilio L0 (no FS deps)
+├── src/mod/        FS module + rtw_bridge + fs_stub + harness
+├── src/sim/        rtw_sim producer
+├── conf/           dialplan example
+├── tests/          unit + protocol fixtures
+├── examples/       node-mock-server
+└── scripts/        smoke, stress, harness, build-mod
 ```
 
 ## 11. Security notes
 
-- Prefer `wss://` in production.
-- Optional shared-secret or JWT in WS URL / first metadata (gateway validates).
+- Prefer `wss://` in production — **not implemented yet**; validator currently accepts **`ws://` only** so TLS is not silently fake.
+- Optional shared-secret / JWT in URL or metadata (gateway validates).
 - Do not log raw audio or credentials.
-- Document that Twilio’s `X-Twilio-Signature` applies to **Twilio-originated** streams; when FS is the producer, use our own auth story.
+- Twilio `X-Twilio-Signature` applies to Twilio-originated streams; FS-as-producer needs our own auth story.
+
+## 12. Design review (2026-07-23) — findings & fixes
+
+Review focused on gaps between written architecture and the shipping bridge.
+
+| Finding | Severity | Fix |
+|---------|----------|-----|
+| Media path called `flush_outbound` (WS send on media thread) — violated §7 | High | Read/write paths enqueue/read only; worker owns send |
+| `do_stop` + `CLOSE` both called `rtw_bridge_stop` → double-free risk on real FS | High | Idempotent `cleanup_started`; CLOSE owns teardown after `bug_remove` |
+| `rtw_validate_ws_uri` accepted `wss://` but client is `ws://` only | High | Reject `wss://` until TLS lands |
+| `callSid` used raw UUID (not Twilio-like `CA`+hex) | Med | Emit `CA` + 32 hex; `streamSid` = `MZ` + 32 hex |
+| Metadata JSON broken by space-splitting | Med | Slice from first `{` before tokenizing |
+| `pause` toggled flags without mutex | Low | Lock around pause |
+| `send_mark` name unsanitized (JSON injection) | Low | Allowlist `[A-Za-z0-9_.-]` |
+| Architecture layout / checklist stale | Doc | Updated §§1,4,7,10 + this table |
+
+### Still open (intentional next work)
+
+1. Real FS `WRITE_REPLACE` frame publish  
+2. `wss://` (TLS) client  
+3. Reconnect without killing the call  
+4. Record-session policy flag  
+5. Clear-latency histogram / SLO  
+6. Pool-allocate `rtw_tech_t` from session memory on real FS (today: `calloc`)

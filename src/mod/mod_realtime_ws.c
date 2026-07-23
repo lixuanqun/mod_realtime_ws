@@ -29,15 +29,18 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
     case SWITCH_ABC_TYPE_INIT:
         break;
     case SWITCH_ABC_TYPE_CLOSE:
+        /* Sole owner of teardown when bug is removed / channel hangs up. */
         channel_closing = tech && tech->close_requested ? 0 : 1;
         if (tech) {
             switch_channel_t *channel = switch_core_session_get_channel(session);
-            switch_channel_set_private(channel, RTW_BUG_NAME, NULL);
+            if (channel) {
+                switch_channel_set_private(channel, RTW_BUG_NAME, NULL);
+            }
             rtw_bridge_stop(session, tech, channel_closing);
         }
         break;
     case SWITCH_ABC_TYPE_READ:
-        if (!tech || tech->close_requested) {
+        if (!tech || tech->close_requested || tech->cleanup_started) {
             return SWITCH_FALSE;
         }
         frame.data = data;
@@ -51,12 +54,11 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
         break;
     case SWITCH_ABC_TYPE_WRITE:
     case SWITCH_ABC_TYPE_WRITE_REPLACE:
-        if (tech && !tech->close_requested) {
+        if (tech && !tech->close_requested && !tech->cleanup_started) {
             int16_t out[320];
             size_t n = rtw_bridge_on_write_pcm16(tech, out, 160);
             (void)n;
-            /* Full WRITE_REPLACE frame publish requires FS session write APIs;
-             * completed in HAVE_FREESWITCH follow-up once linked against real headers. */
+            /* TODO(HAVE_FREESWITCH): publish `out` into write-replace frame. */
         }
         break;
     default:
@@ -107,7 +109,6 @@ static switch_status_t start_capture(switch_core_session_t *session, switch_medi
         switch_channel_set_private(channel, RTW_BUG_NAME, bug);
     }
 #else
-    /* Stub/harness: stash tech pointer as private (no real media bug object). */
     switch_channel_set_private(channel, RTW_BUG_NAME, tech);
     (void)capture_callback;
     (void)flags;
@@ -134,10 +135,8 @@ static switch_status_t do_stop(switch_core_session_t *session)
             tech->close_requested = 1;
         }
         switch_channel_set_private(channel, RTW_BUG_NAME, NULL);
+        /* remove → CLOSE callback owns rtw_bridge_stop (idempotent). */
         switch_core_media_bug_remove(session, &bug);
-        if (tech) {
-            rtw_bridge_stop(session, tech, 0);
-        }
     }
 #else
     {
@@ -149,8 +148,19 @@ static switch_status_t do_stop(switch_core_session_t *session)
     return SWITCH_STATUS_SUCCESS;
 }
 
+/* Extract optional metadata JSON object starting at first '{', so spaces inside JSON work. */
+static char *extract_metadata_json(char *cmd)
+{
+    char *brace;
+    if (!cmd) {
+        return NULL;
+    }
+    brace = strchr(cmd, '{');
+    return brace;
+}
+
 #define RTW_API_SYNTAX \
-    "<uuid> [start|stop|pause|resume|clear|send_mark] [ws-url] [mono|mixed|stereo] [8k|16k|8000|16000] [metadata]"
+    "<uuid> [start|stop|pause|resume|clear|send_mark] [ws-url] [mono|mixed|stereo] [8k|16k] [{metadata-json}]"
 
 SWITCH_STANDARD_API(uuid_realtime_ws_function)
 {
@@ -158,6 +168,7 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
     char *argv[6] = {0};
     int argc = 0;
     switch_status_t status = SWITCH_STATUS_FALSE;
+    char *metadata = NULL;
 
     if (zstr(cmd)) {
         stream->write_function(stream, "-USAGE: %s\n", RTW_API_SYNTAX);
@@ -167,6 +178,15 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
     if (!mycmd) {
         stream->write_function(stream, "-ERR oom\n");
         return SWITCH_STATUS_SUCCESS;
+    }
+    metadata = extract_metadata_json(mycmd);
+    if (metadata && metadata > mycmd && *(metadata - 1) == ' ') {
+        /* Cut token stream at whitespace before JSON so spaces inside JSON are preserved. */
+        char *cut = metadata;
+        while (cut > mycmd && *(cut - 1) == ' ') {
+            cut--;
+        }
+        *cut = '\0';
     }
     argc = switch_separate_string(mycmd, ' ', argv, (int)(sizeof(argv) / sizeof(argv[0])));
     if (argc < 2) {
@@ -202,7 +222,6 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
             char wsUri[RTW_MAX_WS_URI];
             int sampling = 8000;
             switch_media_bug_flag_t flags = SMBF_READ_STREAM | SMBF_WRITE_REPLACE;
-            char *metadata = argc > 5 ? argv[5] : NULL;
             if (argc < 4) {
                 stream->write_function(stream, "-USAGE: %s\n", RTW_API_SYNTAX);
                 switch_core_session_rwunlock(lsession);
@@ -226,8 +245,10 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
                     sampling = atoi(argv[4]);
                 }
             }
-            if (!rtw_validate_ws_uri(argv[2], wsUri, sizeof(wsUri))) {
-                stream->write_function(stream, "-ERR invalid ws uri\n");
+            if (sampling % 8000 != 0) {
+                stream->write_function(stream, "-ERR invalid sample rate\n");
+            } else if (!rtw_validate_ws_uri(argv[2], wsUri, sizeof(wsUri))) {
+                stream->write_function(stream, "-ERR invalid ws uri (ws:// only until TLS lands)\n");
             } else {
                 status = start_capture(lsession, flags, wsUri, sampling, metadata);
             }
@@ -238,10 +259,15 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
     }
 #else
     (void)session;
-    /* Stub build: API parses only; harness calls start_capture directly. */
     if (!strcasecmp(argv[1], "start") && argc >= 4) {
-        status = SWITCH_STATUS_SUCCESS;
-        stream->write_function(stream, "+OK stub parse ok (use harness without HAVE_FREESWITCH)\n");
+        char wsUri[RTW_MAX_WS_URI];
+        if (!rtw_validate_ws_uri(argv[2], wsUri, sizeof(wsUri))) {
+            stream->write_function(stream, "-ERR invalid ws uri (ws:// only until TLS lands)\n");
+            status = SWITCH_STATUS_FALSE;
+        } else {
+            status = SWITCH_STATUS_SUCCESS;
+            stream->write_function(stream, "+OK stub parse ok\n");
+        }
     } else {
         stream->write_function(stream, "+OK stub\n");
         status = SWITCH_STATUS_SUCCESS;
@@ -259,7 +285,6 @@ done:
     return SWITCH_STATUS_SUCCESS;
 }
 
-/* Exported for harness */
 switch_status_t rtw_mod_start_capture(switch_core_session_t *session, switch_media_bug_flag_t flags,
                                       char *ws_uri, int sampling, char *metadata)
 {
