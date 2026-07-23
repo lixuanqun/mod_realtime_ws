@@ -4,7 +4,7 @@
 
 Inspired by battle-tested [mod_audio_stream](https://github.com/amigniter/mod_audio_stream) media-bug patterns, but aimed to **surpass** it: MIT-open full duplex, Twilio `mark`/`clear` barge-in, thin mod + gateway split, multi-sink roadmap. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Positioning.
 
-> Status: **core L0 + module bridge (stub harness) done**; real FreeSWITCH `.so` still needs a host with `libfreeswitch-dev` for WRITE_REPLACE inject. Contributions welcome.
+> Status: **core L0 + module bridge (stub harness) done**; design-review hardening applied (media-thread no WS I/O, idempotent stop, `ws://`-only). Real FS `.so` / WRITE_REPLACE / `wss://` still need `libfreeswitch-dev`. Contributions welcome.
 
 [English](#mod_realtime_ws) · [中文](#中文简介)
 
