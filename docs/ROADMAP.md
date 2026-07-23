@@ -20,8 +20,10 @@ Dates are intentionally omitted; order is by dependency risk.
 - [x] Concurrent stress (`./scripts/stress_test.sh`) — verified 20×3s and 50×5s
 - [x] FS module skeleton + stub compile (`make mod-stub`)
 - [x] Architecture: explicit **learn-from / surpass mod_audio_stream** checklist
-- [ ] Study mod_audio_stream public patterns (media bug, duplex playback, lifecycle) — implement equivalents under MIT (no proprietary code copy)
-- [ ] Out-of-tree `.so` against real FreeSWITCH 1.10.x headers + media bug wiring (**must follow FS mod norms + surpass checklist**)
+- [x] Study mod_audio_stream public patterns — MIT bridge + media-bug layout (`rtw_bridge`, `rtw_tech_t`)
+- [x] Stub harness self-test (`make harness` / `./scripts/mod_harness_test.sh`) — duplex + clear without libfreeswitch
+- [x] Out-of-tree build recipe (`Makefile.fs`, `scripts/build-mod-realtime-ws.sh`)
+- [ ] Link/run `.so` on real FreeSWITCH 1.10.x + complete WRITE_REPLACE inject
 - [ ] Lua dialplan live on FS (example drafted in `conf/dialplan_example.lua`)
 - [ ] Side-by-side parity notes: audio_stream vs realtime_ws (features, latency, license)
 
@@ -50,7 +52,9 @@ Dates are intentionally omitted; order is by dependency risk.
 
 ```bash
 make unit          # codec + protocol + playout/session + fixtures
-make mod-stub      # compile-check FreeSWITCH module API skeleton
-./scripts/smoke_test.sh
+make harness       # FS-stub module bridge binary
+./scripts/smoke_test.sh              # unit + sim + mod harness
 CONCURRENCY=50 SECONDS_RUN=5 ./scripts/stress_test.sh
+# With libfreeswitch-dev:
+./scripts/build-mod-realtime-ws.sh   # see docs/BUILD_FS.md
 ```

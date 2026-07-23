@@ -154,7 +154,7 @@ Expose counters/histograms (log and/or stats interface):
 |----------|------|------|
 | **MRCP** | Standard ASR/TTS control | Poor fit for LLM/S2S; heavy SIP+RTP stack |
 | **mod_audio_stream** | Proven media-bug fork; mature duplex in commercial builds | Private wire format; duplex/gated features; not Twilio-shaped |
-| **mod_realtime_ws** (this) | Same media-bug foundation **plus** Twilio L0, open duplex, mark/clear, MIT, gateway split | Must still complete real FS `.so` wiring to match audio_stream’s production battle scars |
+| **mod_realtime_ws** (this) | Same media-bug foundation **plus** Twilio L0, open duplex, mark/clear, MIT, gateway split | Live FS WRITE_REPLACE inject still pending on hosts with `libfreeswitch-dev` |
 
 **Rule of thumb:** if `mod_audio_stream` solved a hard FS problem (lifetime, inject races, record sync), we study that class of fix — then implement it openly and attach Twilio-compatible control semantics on top.
 

@@ -1,5 +1,7 @@
 CC ?= gcc
-CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -I src/core -I third_party/cJSON
+INCLUDES = -I src/core -I src/mod -I third_party/cJSON
+CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
+CFLAGS += $(INCLUDES)
 LDFLAGS ?=
 
 CORE_SRCS = \
@@ -14,15 +16,21 @@ CORE_SRCS = \
 
 CORE_OBJS = $(CORE_SRCS:.c=.o)
 
+MOD_SRCS = \
+	src/mod/mod_realtime_ws.c \
+	src/mod/rtw_bridge.c
+
+MOD_OBJS = $(MOD_SRCS:.c=.o)
+
 UNIT_TESTS = \
 	build/test_codec \
 	build/test_protocol \
 	build/test_playout_session \
 	build/test_fixtures
 
-.PHONY: all test unit clean sim mod-stub smoke stress
+.PHONY: all test unit clean sim mod-stub harness smoke stress
 
-all: unit sim mod-stub
+all: unit sim mod-stub harness
 
 build:
 	mkdir -p build
@@ -53,11 +61,13 @@ sim: build/rtw_sim
 build/rtw_sim: src/sim/rtw_sim.c $(CORE_OBJS) | build
 	$(CC) $(CFLAGS) -o $@ src/sim/rtw_sim.c $(CORE_OBJS) $(LDFLAGS) -lpthread
 
-mod-stub: build/mod_realtime_ws_stub.o
-	@echo "mod stub compile OK"
+mod-stub: $(MOD_OBJS)
+	@echo "mod stub objects OK: $(MOD_OBJS)"
 
-build/mod_realtime_ws_stub.o: src/mod/mod_realtime_ws.c src/mod/fs_stub/switch.h | build
-	$(CC) $(CFLAGS) -Isrc/mod -c -o $@ src/mod/mod_realtime_ws.c
+harness: build/rtw_mod_harness
+
+build/rtw_mod_harness: src/mod/rtw_mod_harness.c $(MOD_OBJS) $(CORE_OBJS) | build
+	$(CC) $(CFLAGS) -o $@ src/mod/rtw_mod_harness.c $(MOD_OBJS) $(CORE_OBJS) $(LDFLAGS) -lpthread -lm
 
 smoke:
 	./scripts/smoke_test.sh
@@ -69,4 +79,4 @@ stress:
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf build $(CORE_OBJS)
+	rm -rf build $(CORE_OBJS) $(MOD_OBJS)

@@ -1,88 +1,298 @@
 /*
- * mod_realtime_ws — FreeSWITCH loadable module (skeleton).
+ * Copyright (c) 2026 mod_realtime_ws contributors
+ * SPDX-License-Identifier: MIT
  *
- * Build with -DHAVE_FREESWITCH and FreeSWITCH headers to produce mod_realtime_ws.so.
- * Without FreeSWITCH, this file still documents the API surface and can be
- * compile-checked against src/mod/fs_stub/switch.h (see make mod-stub).
+ * FreeSWITCH loadable module — API + media-bug wiring patterned after
+ * amigniter/mod_audio_stream (public community layout), with Twilio L0
+ * protocol via rtw_bridge / rtw_session (MIT, open duplex + mark/clear).
  *
- * Wire protocol and media logic live in src/core (rtw_*); this file only
- * adapts FreeSWITCH media bugs / APIs to rtw_session_t.
+ * Build:
+ *   - Without FreeSWITCH: default stub headers (make mod-stub / harness)
+ *   - With FreeSWITCH: -DHAVE_FREESWITCH $(pkg-config --cflags --libs freeswitch)
  */
-#include "rtw_session.h"
-
-#ifdef HAVE_FREESWITCH
-#include <switch.h>
-#else
-#include "fs_stub/switch.h"
-#endif
+#include "mod_realtime_ws.h"
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_realtime_ws_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_realtime_ws_shutdown);
 SWITCH_MODULE_DEFINITION(mod_realtime_ws, mod_realtime_ws_load, mod_realtime_ws_shutdown, NULL);
 
-#ifndef HAVE_FREESWITCH
-/* Ensure load/shutdown symbols exist for stub link smoke. */
-#endif
+static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+#ifdef HAVE_FREESWITCH
+    switch_core_session_t *session = switch_core_media_bug_get_session(bug);
+    rtw_tech_t *tech = (rtw_tech_t *)user_data;
+    switch_frame_t frame = {0};
+    uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+    int channel_closing;
 
-/*
- * Draft API:
- *   uuid_realtime_ws <uuid> start <wss-url> <mix-type> <rate> [metadata-json]
- *   uuid_realtime_ws <uuid> stop
- *   uuid_realtime_ws <uuid> clear
- *   uuid_realtime_ws <uuid> send_mark <name>
- *
- * Full media-bug + WS worker wiring lands when linked against real FreeSWITCH.
- * Until then, core behavior is validated via rtw_sim + unit/smoke/stress tests.
- */
+    switch (type) {
+    case SWITCH_ABC_TYPE_INIT:
+        break;
+    case SWITCH_ABC_TYPE_CLOSE:
+        channel_closing = tech && tech->close_requested ? 0 : 1;
+        if (tech) {
+            switch_channel_t *channel = switch_core_session_get_channel(session);
+            switch_channel_set_private(channel, RTW_BUG_NAME, NULL);
+            rtw_bridge_stop(session, tech, channel_closing);
+        }
+        break;
+    case SWITCH_ABC_TYPE_READ:
+        if (!tech || tech->close_requested) {
+            return SWITCH_FALSE;
+        }
+        frame.data = data;
+        frame.buflen = sizeof(data);
+        while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+            if (frame.datalen >= sizeof(int16_t)) {
+                rtw_bridge_on_read_pcm16(tech, (const int16_t *)frame.data,
+                                         frame.datalen / sizeof(int16_t));
+            }
+        }
+        break;
+    case SWITCH_ABC_TYPE_WRITE:
+    case SWITCH_ABC_TYPE_WRITE_REPLACE:
+        if (tech && !tech->close_requested) {
+            int16_t out[320];
+            size_t n = rtw_bridge_on_write_pcm16(tech, out, 160);
+            (void)n;
+            /* Full WRITE_REPLACE frame publish requires FS session write APIs;
+             * completed in HAVE_FREESWITCH follow-up once linked against real headers. */
+        }
+        break;
+    default:
+        break;
+    }
+    return SWITCH_TRUE;
+#else
+    (void)bug;
+    (void)user_data;
+    (void)type;
+    return SWITCH_TRUE;
+#endif
+}
+
+static switch_status_t start_capture(switch_core_session_t *session, switch_media_bug_flag_t flags,
+                                     char *ws_uri, int sampling, char *metadata)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    rtw_tech_t *tech = NULL;
+    int channels = (flags & SMBF_STEREO) ? 2 : 1;
+
+    if (!channel) {
+        return SWITCH_STATUS_FALSE;
+    }
+    if (switch_channel_get_private(channel, RTW_BUG_NAME)) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "mod_realtime_ws: bug already attached\n");
+        return SWITCH_STATUS_FALSE;
+    }
+    if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                          "mod_realtime_ws: channel must reach pre-answer before start\n");
+        return SWITCH_STATUS_FALSE;
+    }
+    if (rtw_bridge_start(session, ws_uri, sampling, channels, metadata, &tech) != SWITCH_STATUS_SUCCESS) {
+        return SWITCH_STATUS_FALSE;
+    }
+
+#ifdef HAVE_FREESWITCH
+    {
+        switch_media_bug_t *bug = NULL;
+        switch_status_t st;
+        st = switch_core_media_bug_add(session, RTW_BUG_NAME, NULL, capture_callback, tech, 0, flags, &bug);
+        if (st != SWITCH_STATUS_SUCCESS) {
+            rtw_bridge_stop(session, tech, 0);
+            return st;
+        }
+        switch_channel_set_private(channel, RTW_BUG_NAME, bug);
+    }
+#else
+    /* Stub/harness: stash tech pointer as private (no real media bug object). */
+    switch_channel_set_private(channel, RTW_BUG_NAME, tech);
+    (void)capture_callback;
+    (void)flags;
+#endif
+    return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t do_stop(switch_core_session_t *session)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    void *priv;
+    if (!channel) {
+        return SWITCH_STATUS_FALSE;
+    }
+    priv = switch_channel_get_private(channel, RTW_BUG_NAME);
+    if (!priv) {
+        return SWITCH_STATUS_FALSE;
+    }
+#ifdef HAVE_FREESWITCH
+    {
+        switch_media_bug_t *bug = (switch_media_bug_t *)priv;
+        rtw_tech_t *tech = (rtw_tech_t *)switch_core_media_bug_get_user_data(bug);
+        if (tech) {
+            tech->close_requested = 1;
+        }
+        switch_channel_set_private(channel, RTW_BUG_NAME, NULL);
+        switch_core_media_bug_remove(session, &bug);
+        if (tech) {
+            rtw_bridge_stop(session, tech, 0);
+        }
+    }
+#else
+    {
+        rtw_tech_t *tech = (rtw_tech_t *)priv;
+        switch_channel_set_private(channel, RTW_BUG_NAME, NULL);
+        rtw_bridge_stop(session, tech, 0);
+    }
+#endif
+    return SWITCH_STATUS_SUCCESS;
+}
+
+#define RTW_API_SYNTAX \
+    "<uuid> [start|stop|pause|resume|clear|send_mark] [ws-url] [mono|mixed|stereo] [8k|16k|8000|16000] [metadata]"
 
 SWITCH_STANDARD_API(uuid_realtime_ws_function)
 {
-    char *cmd_dup;
-    char *argv[8] = {0};
-    int argc;
+    char *mycmd = NULL;
+    char *argv[6] = {0};
+    int argc = 0;
+    switch_status_t status = SWITCH_STATUS_FALSE;
+
     if (zstr(cmd)) {
-        stream->write_function(stream, "-ERR usage: uuid_realtime_ws <uuid> <start|stop|clear|send_mark> ...\n");
+        stream->write_function(stream, "-USAGE: %s\n", RTW_API_SYNTAX);
         return SWITCH_STATUS_SUCCESS;
     }
-    cmd_dup = strdup(cmd);
-    if (!cmd_dup) {
+    mycmd = strdup(cmd);
+    if (!mycmd) {
         stream->write_function(stream, "-ERR oom\n");
         return SWITCH_STATUS_SUCCESS;
     }
-    argc = switch_separate_string(cmd_dup, ' ', argv, (int)(sizeof(argv) / sizeof(argv[0])));
+    argc = switch_separate_string(mycmd, ' ', argv, (int)(sizeof(argv) / sizeof(argv[0])));
     if (argc < 2) {
-        stream->write_function(stream, "-ERR missing args\n");
-        free(cmd_dup);
-        return SWITCH_STATUS_SUCCESS;
+        stream->write_function(stream, "-USAGE: %s\n", RTW_API_SYNTAX);
+        goto done;
     }
-    /* Skeleton: acknowledge commands without channel attach when stubbed. */
-    if (!strcasecmp(argv[1], "start")) {
-        stream->write_function(stream, "+OK start queued (skeleton; use rtw_sim until FS build)\n");
-    } else if (!strcasecmp(argv[1], "stop")) {
-        stream->write_function(stream, "+OK stop\n");
-    } else if (!strcasecmp(argv[1], "clear")) {
-        stream->write_function(stream, "+OK clear\n");
-    } else if (!strcasecmp(argv[1], "send_mark")) {
-        stream->write_function(stream, "+OK mark\n");
+
+#ifdef HAVE_FREESWITCH
+    {
+        switch_core_session_t *lsession = switch_core_session_locate(argv[0]);
+        if (!lsession) {
+            stream->write_function(stream, "-ERR cannot locate session\n");
+            goto done;
+        }
+        if (!strcasecmp(argv[1], "stop")) {
+            status = do_stop(lsession);
+        } else if (!strcasecmp(argv[1], "pause") || !strcasecmp(argv[1], "resume")) {
+            switch_channel_t *ch = switch_core_session_get_channel(lsession);
+            switch_media_bug_t *bug = switch_channel_get_private(ch, RTW_BUG_NAME);
+            rtw_tech_t *tech = bug ? (rtw_tech_t *)switch_core_media_bug_get_user_data(bug) : NULL;
+            status = tech ? rtw_bridge_pause(tech, !strcasecmp(argv[1], "pause")) : SWITCH_STATUS_FALSE;
+        } else if (!strcasecmp(argv[1], "clear")) {
+            switch_channel_t *ch = switch_core_session_get_channel(lsession);
+            switch_media_bug_t *bug = switch_channel_get_private(ch, RTW_BUG_NAME);
+            rtw_tech_t *tech = bug ? (rtw_tech_t *)switch_core_media_bug_get_user_data(bug) : NULL;
+            status = tech ? rtw_bridge_clear(tech) : SWITCH_STATUS_FALSE;
+        } else if (!strcasecmp(argv[1], "send_mark")) {
+            switch_channel_t *ch = switch_core_session_get_channel(lsession);
+            switch_media_bug_t *bug = switch_channel_get_private(ch, RTW_BUG_NAME);
+            rtw_tech_t *tech = bug ? (rtw_tech_t *)switch_core_media_bug_get_user_data(bug) : NULL;
+            status = (tech && argc > 2) ? rtw_bridge_send_mark(tech, argv[2]) : SWITCH_STATUS_FALSE;
+        } else if (!strcasecmp(argv[1], "start")) {
+            char wsUri[RTW_MAX_WS_URI];
+            int sampling = 8000;
+            switch_media_bug_flag_t flags = SMBF_READ_STREAM | SMBF_WRITE_REPLACE;
+            char *metadata = argc > 5 ? argv[5] : NULL;
+            if (argc < 4) {
+                stream->write_function(stream, "-USAGE: %s\n", RTW_API_SYNTAX);
+                switch_core_session_rwunlock(lsession);
+                goto done;
+            }
+            if (!strcmp(argv[3], "mixed")) {
+                flags |= SMBF_WRITE_STREAM;
+            } else if (!strcmp(argv[3], "stereo")) {
+                flags |= SMBF_WRITE_STREAM | SMBF_STEREO;
+            } else if (strcmp(argv[3], "mono") != 0) {
+                stream->write_function(stream, "-ERR invalid mix type\n");
+                switch_core_session_rwunlock(lsession);
+                goto done;
+            }
+            if (argc > 4) {
+                if (!strcmp(argv[4], "16k") || !strcmp(argv[4], "16000")) {
+                    sampling = 16000;
+                } else if (!strcmp(argv[4], "8k") || !strcmp(argv[4], "8000")) {
+                    sampling = 8000;
+                } else {
+                    sampling = atoi(argv[4]);
+                }
+            }
+            if (!rtw_validate_ws_uri(argv[2], wsUri, sizeof(wsUri))) {
+                stream->write_function(stream, "-ERR invalid ws uri\n");
+            } else {
+                status = start_capture(lsession, flags, wsUri, sampling, metadata);
+            }
+        } else {
+            stream->write_function(stream, "-ERR unknown subcommand\n");
+        }
+        switch_core_session_rwunlock(lsession);
+    }
+#else
+    (void)session;
+    /* Stub build: API parses only; harness calls start_capture directly. */
+    if (!strcasecmp(argv[1], "start") && argc >= 4) {
+        status = SWITCH_STATUS_SUCCESS;
+        stream->write_function(stream, "+OK stub parse ok (use harness without HAVE_FREESWITCH)\n");
     } else {
-        stream->write_function(stream, "-ERR unknown subcommand\n");
+        stream->write_function(stream, "+OK stub\n");
+        status = SWITCH_STATUS_SUCCESS;
     }
-    free(cmd_dup);
+#endif
+
+    if (status == SWITCH_STATUS_SUCCESS) {
+        stream->write_function(stream, "+OK Success\n");
+    } else {
+        stream->write_function(stream, "-ERR Operation Failed\n");
+    }
+
+done:
+    switch_safe_free(mycmd);
     return SWITCH_STATUS_SUCCESS;
+}
+
+/* Exported for harness */
+switch_status_t rtw_mod_start_capture(switch_core_session_t *session, switch_media_bug_flag_t flags,
+                                      char *ws_uri, int sampling, char *metadata)
+{
+    return start_capture(session, flags, ws_uri, sampling, metadata);
+}
+
+switch_status_t rtw_mod_stop_capture(switch_core_session_t *session)
+{
+    return do_stop(session);
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_realtime_ws_load)
 {
     switch_api_interface_t *api_interface = NULL;
     *module_interface = switch_loadable_module_create_module_interface(pool, modname);
-    SWITCH_ADD_API(api_interface, "uuid_realtime_ws", "Realtime WS media bridge",
-                   uuid_realtime_ws_function, "<uuid> <start|stop|clear|send_mark> [args]");
-    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
-                      "mod_realtime_ws loaded (core validated via rtw_sim; FS media-bug pending)\n");
+    switch_event_reserve_subclass(RTW_EVENT_CONNECT);
+    switch_event_reserve_subclass(RTW_EVENT_DISCONNECT);
+    switch_event_reserve_subclass(RTW_EVENT_ERROR);
+    switch_event_reserve_subclass(RTW_EVENT_JSON);
+    SWITCH_ADD_API(api_interface, "uuid_realtime_ws", "Realtime WS Twilio-compatible media bridge",
+                   uuid_realtime_ws_function, RTW_API_SYNTAX);
+    switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid start");
+    switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid stop");
+    switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid clear");
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_realtime_ws loaded\n");
     return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_realtime_ws_shutdown)
 {
+    switch_event_free_subclass(RTW_EVENT_CONNECT);
+    switch_event_free_subclass(RTW_EVENT_DISCONNECT);
+    switch_event_free_subclass(RTW_EVENT_ERROR);
+    switch_event_free_subclass(RTW_EVENT_JSON);
     return SWITCH_STATUS_SUCCESS;
 }

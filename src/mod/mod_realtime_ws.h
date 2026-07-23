@@ -1,0 +1,75 @@
+/*
+ * Copyright (c) 2026 mod_realtime_ws contributors
+ * SPDX-License-Identifier: MIT
+ *
+ * FreeSWITCH module header — patterned after mod_audio_stream's private_t /
+ * media-bug lifecycle, with Twilio L0 session (rtw_session) underneath.
+ */
+#ifndef MOD_REALTIME_WS_H
+#define MOD_REALTIME_WS_H
+
+#include <stdint.h>
+#include <pthread.h>
+
+#ifdef HAVE_FREESWITCH
+#include <switch.h>
+#else
+#include "fs_stub/switch.h"
+#endif
+
+#include "rtw_session.h"
+#include "rtw_ws_client.h"
+
+#define RTW_BUG_NAME "realtime_ws"
+#define RTW_MAX_WS_URI 4096
+#define RTW_MAX_META 8192
+#define RTW_MAX_SID 64
+
+#define RTW_EVENT_CONNECT "mod_realtime_ws::connect"
+#define RTW_EVENT_DISCONNECT "mod_realtime_ws::disconnect"
+#define RTW_EVENT_ERROR "mod_realtime_ws::error"
+#define RTW_EVENT_JSON "mod_realtime_ws::json"
+
+typedef struct rtw_tech_private {
+    switch_mutex_t *mutex;
+    char session_id[RTW_MAX_SID];
+    char stream_sid[RTW_SID_MAX];
+    char ws_uri[RTW_MAX_WS_URI];
+    char metadata[RTW_MAX_META];
+    int sampling; /* target rate to peer; L0 uses 8000 */
+    int channels;
+    int audio_paused;
+    int close_requested;
+    int cleanup_started;
+    int ws_ready;
+    rtw_session_t session;
+    rtw_ws_client_t *ws;
+    pthread_t worker;
+    int worker_started;
+    /* leftover PCM samples when frame size != 160 */
+    int16_t pcm_hold[320];
+    size_t pcm_hold_len;
+} rtw_tech_t;
+
+/* Bridge API used by module + harness (no proprietary audio_stream code). */
+switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_uri, int sampling,
+                                 int channels, const char *metadata, rtw_tech_t **out_tech);
+switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech, int channel_closing);
+switch_status_t rtw_bridge_pause(rtw_tech_t *tech, int pause);
+switch_status_t rtw_bridge_clear(rtw_tech_t *tech);
+switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name);
+
+/* Media-bug READ path: feed L16 PCM (mono interleaved). */
+switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, size_t nsamples);
+
+/* Media-bug WRITE path: fill buffer with mulaw/L16 for inject; returns samples written. */
+size_t rtw_bridge_on_write_pcm16(rtw_tech_t *tech, int16_t *out, size_t max_samples);
+
+int rtw_validate_ws_uri(const char *url, char *out, size_t out_cap);
+
+/* Module entry points used by harness / future ESL wrappers */
+switch_status_t rtw_mod_start_capture(switch_core_session_t *session, switch_media_bug_flag_t flags,
+                                      char *ws_uri, int sampling, char *metadata);
+switch_status_t rtw_mod_stop_capture(switch_core_session_t *session);
+
+#endif

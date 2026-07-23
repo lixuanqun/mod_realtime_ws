@@ -30,4 +30,7 @@ MOCK_PID=$!
 sleep 0.5
 ./build/rtw_sim --url ws://127.0.0.1:18082/media --seconds 2 --clear-test
 
+echo "== mod harness =="
+./scripts/mod_harness_test.sh
+
 echo "ALL SMOKE PASSED"

@@ -4,7 +4,7 @@
 
 Inspired by battle-tested [mod_audio_stream](https://github.com/amigniter/mod_audio_stream) media-bug patterns, but aimed to **surpass** it: MIT-open full duplex, Twilio `mark`/`clear` barge-in, thin mod + gateway split, multi-sink roadmap. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Positioning.
 
-> Status: **core L0 + sim/smoke/stress done**; real FreeSWITCH `.so` media-bug wiring still in progress. Contributions welcome.
+> Status: **core L0 + module bridge (stub harness) done**; real FreeSWITCH `.so` still needs a host with `libfreeswitch-dev` for WRITE_REPLACE inject. Contributions welcome.
 
 [English](#mod_realtime_ws) · [中文](#中文简介)
 
@@ -37,8 +37,9 @@ Existing backends written for Twilio Media Streams can connect to FreeSWITCH wit
 - [x] Architecture & protocol compatibility docs
 - [x] Portable L0 core (Twilio JSON, mulaw/8k, mark/clear, bounded queue)
 - [x] `rtw_sim` + Node mock smoke / stress tests
-- [x] FreeSWITCH module API skeleton (`make mod-stub`)
-- [ ] Out-of-tree FreeSWITCH `.so` with media bug + WS worker
+- [x] FreeSWITCH module API + bridge (`rtw_bridge`, media-bug layout)
+- [x] Stub harness duplex/clear self-test (`make harness`)
+- [ ] Out-of-tree FreeSWITCH `.so` verified on live FS + WRITE_REPLACE
 - [ ] Client mode: FS opens `wss://` to your server (TLS)
 - [ ] Optional: binary L16 frames, multi-sink, WS server mode
 
@@ -51,12 +52,14 @@ Non-goals for v1: embedding OpenAI/Gemini/Deepgram SDKs inside the module; video
 ```bash
 make unit                 # C unit tests
 make sim                  # build rtw_sim
-make mod-stub             # compile-check FS module skeleton
-./scripts/smoke_test.sh   # unit + echo + clear over WebSocket
+make harness              # FS-stub module bridge binary
+./scripts/smoke_test.sh   # unit + echo + clear + mod harness
 CONCURRENCY=50 SECONDS_RUN=5 ./scripts/stress_test.sh
+# Real FreeSWITCH .so (needs libfreeswitch-dev):
+./scripts/build-mod-realtime-ws.sh   # see docs/BUILD_FS.md
 ```
 
-Requires: `gcc`, `make`, `node`/`npm` (for mock peer). FreeSWITCH headers are **not** required for core/sim tests.
+Requires: `gcc`, `make`, `node`/`npm` (for mock peer). FreeSWITCH headers are **not** required for core/sim/harness tests.
 
 ---
 
@@ -117,12 +120,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Design discussion and protocol test vect
 
 ## 中文简介
 
-`mod_realtime_ws` 是面向 **FreeSWITCH** 的开源模块（规划中）：把通话实时音频通过 **WebSocket** 旁路到外部系统，并支持回灌与打断。
+`mod_realtime_ws` 是面向 **FreeSWITCH** 的开源模块：把通话实时音频通过 **WebSocket** 旁路到外部系统，并支持回灌与打断。
 
-- **协议**：兼容 [Twilio Media Streams](https://www.twilio.com/docs/voice/media-streams) 事件模型（`start` / `media` / `mark` / `clear` 等）
-- **场景**：AI 语音坐席、实时 ASR、质检旁路、对话打断（barge-in）
-- **许可**：MIT
-- **当前阶段**：先文档与协议，再写代码
+- **借鉴** [mod_audio_stream](https://github.com/amigniter/mod_audio_stream) 的 media bug / 全双工经验  
+- **超越**：MIT 开放双向、`mark`/`clear` 对齐 Twilio、薄模块 + Gateway、多 sink 路线（见架构文档）  
+- **协议**：兼容 Twilio Media Streams L0  
+- **当前**：core + 模块桥（stub harness 双工/`clear`）已通；真机 `.so` / WRITE_REPLACE 需 `libfreeswitch-dev` 
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/PROTOCOL.md](docs/PROTOCOL.md)。
 
