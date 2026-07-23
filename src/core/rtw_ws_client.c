@@ -56,7 +56,6 @@ static int parse_url(const char *url, char *host, size_t host_cap, int *port, ch
     const char *p;
     const char *host_start;
     const char *path_start;
-    char portbuf[16];
     int tls = 0;
     int default_port = 80;
 
@@ -87,40 +86,85 @@ static int parse_url(const char *url, char *host, size_t host_cap, int *port, ch
     {
         size_t hostport_len = (size_t)(path_start - host_start);
         char hostport[256];
-        const char *colon;
-        if (hostport_len >= sizeof(hostport)) {
+        if (hostport_len >= sizeof(hostport) || hostport_len == 0) {
             return -1;
         }
         memcpy(hostport, host_start, hostport_len);
         hostport[hostport_len] = '\0';
-        colon = strrchr(hostport, ':');
-        if (colon) {
-            size_t hlen = (size_t)(colon - hostport);
-            if (hlen >= host_cap) {
+        /* IPv6: [::1]:443 or [::1] */
+        if (hostport[0] == '[') {
+            char *rbr = strchr(hostport, ']');
+            if (!rbr) {
                 return -1;
             }
-            memcpy(host, hostport, hlen);
-            host[hlen] = '\0';
-            snprintf(portbuf, sizeof(portbuf), "%s", colon + 1);
-            *port = atoi(portbuf);
+            {
+                size_t hlen = (size_t)(rbr - hostport - 1);
+                if (hlen >= host_cap) {
+                    return -1;
+                }
+                memcpy(host, hostport + 1, hlen);
+                host[hlen] = '\0';
+            }
+            if (rbr[1] == ':') {
+                *port = atoi(rbr + 2);
+            } else if (rbr[1] == '\0') {
+                *port = default_port;
+            } else {
+                return -1;
+            }
         } else {
-            snprintf(host, host_cap, "%s", hostport);
-            *port = default_port;
+            const char *colon = strrchr(hostport, ':');
+            if (colon) {
+                size_t hlen = (size_t)(colon - hostport);
+                if (hlen >= host_cap) {
+                    return -1;
+                }
+                memcpy(host, hostport, hlen);
+                host[hlen] = '\0';
+                *port = atoi(colon + 1);
+            } else {
+                snprintf(host, host_cap, "%s", hostport);
+                *port = default_port;
+            }
         }
     }
     *use_tls = tls;
     return 0;
 }
 
-static ssize_t io_write(rtw_ws_client_t *c, const void *buf, size_t len)
+static ssize_t io_write_all(rtw_ws_client_t *c, const void *buf, size_t len)
 {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n;
 #ifdef RTW_HAS_OPENSSL
-    if (c->use_tls && c->ssl) {
-        int n = SSL_write(c->ssl, buf, (int)len);
-        return n;
-    }
+        if (c->use_tls && c->ssl) {
+            n = SSL_write(c->ssl, p + off, (int)(len - off));
+            if (n <= 0) {
+                int err = SSL_get_error(c->ssl, (int)n);
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                    continue;
+                }
+                return -1;
+            }
+        } else
 #endif
-    return send(c->fd, buf, len, 0);
+        {
+            n = send(c->fd, p + off, len - off, 0);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
+            }
+            if (n == 0) {
+                return -1;
+            }
+        }
+        off += (size_t)n;
+    }
+    return (ssize_t)off;
 }
 
 static ssize_t io_read(rtw_ws_client_t *c, void *buf, size_t len)
@@ -136,20 +180,29 @@ static ssize_t io_read(rtw_ws_client_t *c, void *buf, size_t len)
 
 static int http_handshake(rtw_ws_client_t *c, const char *host, int port, const char *path)
 {
-    char req[1024];
+    char req[1280];
     char buf[2048];
+    char host_hdr[300];
     size_t nread = 0;
     int n;
+    /* Bracket IPv6 literals in Host header. */
+    if (strchr(host, ':')) {
+        snprintf(host_hdr, sizeof(host_hdr), "[%s]:%d", host, port);
+    } else if ((c->use_tls && port == 443) || (!c->use_tls && port == 80)) {
+        snprintf(host_hdr, sizeof(host_hdr), "%s", host);
+    } else {
+        snprintf(host_hdr, sizeof(host_hdr), "%s:%d", host, port);
+    }
     snprintf(req, sizeof(req),
              "GET %s HTTP/1.1\r\n"
-             "Host: %s:%d\r\n"
+             "Host: %s\r\n"
              "Upgrade: websocket\r\n"
              "Connection: Upgrade\r\n"
              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
              "Sec-WebSocket-Version: 13\r\n"
              "\r\n",
-             path, host, port);
-    if (io_write(c, req, strlen(req)) < 0) {
+             path, host_hdr);
+    if (io_write_all(c, req, strlen(req)) < 0) {
         return -1;
     }
     while (nread < sizeof(buf) - 1) {
@@ -350,7 +403,7 @@ int rtw_ws_send_text(rtw_ws_client_t *c, const char *text, size_t len)
     for (i = 0; i < len; i++) {
         frame[hdr_len + i] = (uint8_t)text[i] ^ key[i % 4];
     }
-    n = io_write(c, frame, hdr_len + len);
+    n = io_write_all(c, frame, hdr_len + len);
     free(frame);
     return n < 0 ? -1 : 0;
 }

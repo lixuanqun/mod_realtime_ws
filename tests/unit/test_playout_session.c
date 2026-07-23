@@ -51,6 +51,23 @@ static void test_queue_drop_oldest(void)
     rtw_queue_destroy(&q);
 }
 
+static void test_queue_peek_drop(void)
+{
+    rtw_bounded_queue_t q;
+    const char *p;
+    size_t len;
+    RTW_CHECK(rtw_queue_init(&q, 4) == 0);
+    RTW_CHECK(rtw_queue_push(&q, "hello", 5) == 0);
+    RTW_CHECK(rtw_queue_peek(&q, &p, &len) == 0);
+    RTW_CHECK(len == 5);
+    RTW_CHECK(strcmp(p, "hello") == 0);
+    RTW_CHECK(rtw_queue_size(&q) == 1);
+    RTW_CHECK(rtw_queue_drop_head(&q) == 0);
+    RTW_CHECK(rtw_queue_size(&q) == 0);
+    RTW_CHECK(rtw_queue_peek(&q, &p, &len) != 0);
+    rtw_queue_destroy(&q);
+}
+
 static void test_session_uplink_and_clear(void)
 {
     rtw_session_t s;
@@ -125,6 +142,7 @@ static void run(void)
 {
     test_playout_mark_clear();
     test_queue_drop_oldest();
+    test_queue_peek_drop();
     test_session_uplink_and_clear();
 }
 

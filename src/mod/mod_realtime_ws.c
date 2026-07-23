@@ -52,20 +52,21 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             }
         }
         break;
-    case SWITCH_ABC_TYPE_WRITE:
     case SWITCH_ABC_TYPE_WRITE_REPLACE:
+        /* Only WRITE_REPLACE exposes get/set_write_replace_frame. */
         if (tech && !tech->close_requested && !tech->cleanup_started) {
-            switch_frame_t *frame = switch_core_media_bug_get_write_replace_frame(bug);
-            if (frame && frame->data && frame->datalen >= (int)sizeof(int16_t)) {
-                size_t nsamples = (size_t)frame->datalen / sizeof(int16_t);
-                size_t n = rtw_bridge_apply_write_frame(tech, (int16_t *)frame->data, nsamples);
+            switch_frame_t *wframe = switch_core_media_bug_get_write_replace_frame(bug);
+            if (wframe && wframe->data && wframe->datalen >= (int)sizeof(int16_t)) {
+                size_t nsamples = (size_t)wframe->datalen / sizeof(int16_t);
+                size_t n = rtw_bridge_apply_write_frame(tech, (int16_t *)wframe->data, nsamples);
                 if (n > 0) {
-                    /* Injected / mixed — frame already mutated in place. */
-                    switch_core_media_bug_set_write_replace_frame(bug, frame);
+                    switch_core_media_bug_set_write_replace_frame(bug, wframe);
                 }
-                /* n==0: passthrough original write audio (other leg). */
             }
         }
+        break;
+    case SWITCH_ABC_TYPE_WRITE:
+        /* Soft write tap — unused; inject is via WRITE_REPLACE. */
         break;
     default:
         break;

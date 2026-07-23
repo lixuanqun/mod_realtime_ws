@@ -45,9 +45,9 @@ typedef struct rtw_tech_private {
     int sampling; /* source rate from FS; L0 wire is always 8k mulaw */
     int channels;
     int audio_paused;
-    int close_requested;
-    int cleanup_started; /* idempotent stop / CLOSE */
-    int ws_ready;
+    volatile int close_requested;
+    volatile int cleanup_started; /* idempotent stop / CLOSE */
+    volatile int ws_ready;
     rtw_session_t session;
     rtw_ws_client_t *ws;
     pthread_t worker;

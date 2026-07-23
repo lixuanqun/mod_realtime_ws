@@ -14,14 +14,25 @@
  * - on_ws_text runs inside worker poll → may flush.
  */
 
+static int stopping(const rtw_tech_t *tech)
+{
+    return !tech || tech->close_requested || tech->cleanup_started;
+}
+
+/* Send queued JSON without dropping when socket is down (peek → send → drop). */
 static void flush_outbound(rtw_tech_t *tech)
 {
-    char *json;
-    while (rtw_session_pop_outbound(&tech->session, &json) == 0) {
-        if (tech->ws && tech->ws_ready) {
-            rtw_ws_send_text(tech->ws, json, strlen(json));
+    const char *json;
+    size_t len;
+    if (!tech->ws || !tech->ws_ready) {
+        return;
+    }
+    while (rtw_session_peek_outbound(&tech->session, &json, &len) == 0) {
+        if (rtw_ws_send_text(tech->ws, json, len) != 0) {
+            tech->ws_ready = 0;
+            return;
         }
-        free(json);
+        rtw_session_drop_outbound_head(&tech->session);
     }
 }
 
@@ -29,14 +40,16 @@ static void on_ws_text(void *userdata, const char *text, size_t len)
 {
     rtw_tech_t *tech = (rtw_tech_t *)userdata;
     (void)len;
-    if (!tech || tech->close_requested || tech->cleanup_started) {
+    if (stopping(tech)) {
         return;
     }
     if (switch_mutex_lock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
         return;
     }
-    rtw_session_handle_peer_json(&tech->session, text);
-    flush_outbound(tech);
+    if (!stopping(tech)) {
+        rtw_session_handle_peer_json(&tech->session, text);
+        flush_outbound(tech);
+    }
     switch_mutex_unlock(tech->mutex);
 }
 
@@ -49,21 +62,39 @@ static void on_ws_close(void *userdata, int code)
     }
 }
 
+static int sleep_interruptible_ms(rtw_tech_t *tech, int total_ms)
+{
+    int left = total_ms;
+    while (left > 0) {
+        int slice = left > 50 ? 50 : left;
+        if (stopping(tech) || !tech->reconnect_enabled) {
+            return -1;
+        }
+        usleep((useconds_t)slice * 1000);
+        left -= slice;
+    }
+    return stopping(tech) ? -1 : 0;
+}
+
 static int try_reconnect(rtw_tech_t *tech)
 {
     int backoff_ms;
-    if (!tech->reconnect_enabled || tech->close_requested || tech->cleanup_started) {
+    int shift;
+    if (!tech->reconnect_enabled || stopping(tech)) {
         return -1;
     }
     if (tech->reconnect_max > 0 && tech->reconnect_attempts >= tech->reconnect_max) {
         return -1;
     }
     tech->reconnect_attempts++;
-    backoff_ms = 100 << (tech->reconnect_attempts > 5 ? 5 : tech->reconnect_attempts);
+    shift = tech->reconnect_attempts > 5 ? 5 : tech->reconnect_attempts;
+    backoff_ms = 100 << shift;
     if (backoff_ms > 3000) {
         backoff_ms = 3000;
     }
-    usleep((useconds_t)backoff_ms * 1000);
+    if (sleep_interruptible_ms(tech, backoff_ms) != 0) {
+        return -1;
+    }
 
     if (tech->ws) {
         rtw_ws_close(tech->ws);
@@ -73,10 +104,17 @@ static int try_reconnect(rtw_tech_t *tech)
     if (!tech->ws) {
         return -1;
     }
+    if (stopping(tech)) {
+        rtw_ws_close(tech->ws);
+        tech->ws = NULL;
+        return -1;
+    }
     tech->ws_ready = 1;
     if (switch_mutex_lock(tech->mutex) == SWITCH_STATUS_SUCCESS) {
-        rtw_session_rehandshake(&tech->session);
-        flush_outbound(tech);
+        if (!stopping(tech)) {
+            rtw_session_rehandshake(&tech->session);
+            flush_outbound(tech);
+        }
         switch_mutex_unlock(tech->mutex);
     }
     tech->reconnect_ok++;
@@ -87,7 +125,7 @@ static int try_reconnect(rtw_tech_t *tech)
 static void *ws_worker(void *arg)
 {
     rtw_tech_t *tech = (rtw_tech_t *)arg;
-    while (tech && !tech->close_requested && !tech->cleanup_started) {
+    while (tech && !stopping(tech)) {
         if (tech->ws && tech->ws_ready) {
             if (rtw_ws_poll(tech->ws, 20) < 0) {
                 tech->ws_ready = 0;
@@ -103,6 +141,9 @@ static void *ws_worker(void *arg)
             continue;
         } else {
             usleep(20 * 1000);
+        }
+        if (stopping(tech)) {
+            break;
         }
         if (switch_mutex_trylock(tech->mutex) == SWITCH_STATUS_SUCCESS) {
             flush_outbound(tech);
@@ -231,7 +272,7 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     tech->inject_mode = RTW_INJECT_REPLACE;
     tech->reconnect_enabled = 1;
     tech->reconnect_max = 10;
-    tech->record_injected = 1; /* WRITE_REPLACE sits on media path → typically recorded */
+    tech->record_injected = 1;
     env = getenv("RTW_RECONNECT");
     if (env && env[0] == '0') {
         tech->reconnect_enabled = 0;
@@ -299,6 +340,10 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
     }
     if (tech->mutex && switch_mutex_lock(tech->mutex) == SWITCH_STATUS_SUCCESS) {
         rtw_session_stop(&tech->session);
+        /* Best-effort: try to flush stop even if worker marked ws not ready. */
+        if (tech->ws) {
+            tech->ws_ready = 1;
+        }
         flush_outbound(tech);
         switch_mutex_unlock(tech->mutex);
     }
@@ -366,25 +411,48 @@ switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name)
 switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, size_t nsamples)
 {
     size_t i = 0;
-    if (!tech || !pcm || tech->close_requested || tech->cleanup_started || tech->audio_paused) {
+    if (!tech || !pcm || stopping(tech) || tech->audio_paused) {
         return SWITCH_TRUE;
     }
     if (switch_mutex_trylock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
         return SWITCH_TRUE;
     }
-    while (i < nsamples) {
-        int16_t sample = pcm[i++];
-        if (tech->sampling == 16000) {
-            if (i < nsamples) {
-                sample = (int16_t)(((int)sample + (int)pcm[i++]) / 2);
+    /* Stereo L0: take left channel only (Twilio inbound is mono). */
+    if (tech->channels >= 2) {
+        while (i + 1 < nsamples) {
+            int16_t sample = pcm[i];
+            i += 2;
+            if (tech->sampling == 16000) {
+                /* Already at wire target after stereo fold; if source is 16k stereo,
+                 * pair-average successive left samples when available. */
+                if (i + 1 < nsamples) {
+                    sample = (int16_t)(((int)sample + (int)pcm[i]) / 2);
+                    i += 2;
+                }
+            }
+            if (tech->pcm_hold_len < sizeof(tech->pcm_hold) / sizeof(tech->pcm_hold[0])) {
+                tech->pcm_hold[tech->pcm_hold_len++] = sample;
+            }
+            if (tech->pcm_hold_len >= 160) {
+                rtw_session_push_pcm16(&tech->session, tech->pcm_hold, 160);
+                tech->pcm_hold_len = 0;
             }
         }
-        if (tech->pcm_hold_len < sizeof(tech->pcm_hold) / sizeof(tech->pcm_hold[0])) {
-            tech->pcm_hold[tech->pcm_hold_len++] = sample;
-        }
-        if (tech->pcm_hold_len >= 160) {
-            rtw_session_push_pcm16(&tech->session, tech->pcm_hold, 160);
-            tech->pcm_hold_len = 0;
+    } else {
+        while (i < nsamples) {
+            int16_t sample = pcm[i++];
+            if (tech->sampling == 16000) {
+                if (i < nsamples) {
+                    sample = (int16_t)(((int)sample + (int)pcm[i++]) / 2);
+                }
+            }
+            if (tech->pcm_hold_len < sizeof(tech->pcm_hold) / sizeof(tech->pcm_hold[0])) {
+                tech->pcm_hold[tech->pcm_hold_len++] = sample;
+            }
+            if (tech->pcm_hold_len >= 160) {
+                rtw_session_push_pcm16(&tech->session, tech->pcm_hold, 160);
+                tech->pcm_hold_len = 0;
+            }
         }
     }
     switch_mutex_unlock(tech->mutex);
@@ -414,18 +482,28 @@ size_t rtw_bridge_on_write_pcm16(rtw_tech_t *tech, int16_t *out, size_t max_samp
 size_t rtw_bridge_apply_write_frame(rtw_tech_t *tech, int16_t *inout_pcm, size_t nsamples)
 {
     int16_t agent[640];
+    uint8_t mulaw[640];
     size_t n;
     size_t i;
     size_t want;
+    rtw_inject_mode_t mode;
     if (!tech || !inout_pcm || nsamples == 0 || tech->cleanup_started) {
         return 0;
     }
     want = nsamples < (sizeof(agent) / sizeof(agent[0])) ? nsamples : (sizeof(agent) / sizeof(agent[0]));
-    n = rtw_bridge_on_write_pcm16(tech, agent, want);
-    if (n == 0) {
-        return 0; /* passthrough: leave inout unchanged */
+    if (switch_mutex_trylock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
+        return 0;
     }
-    if (tech->inject_mode == RTW_INJECT_MIX) {
+    mode = tech->inject_mode;
+    n = rtw_session_read_playout(&tech->session, mulaw, want);
+    if (n > 0) {
+        rtw_mulaw_to_pcm16(mulaw, n, agent);
+    }
+    switch_mutex_unlock(tech->mutex);
+    if (n == 0) {
+        return 0;
+    }
+    if (mode == RTW_INJECT_MIX) {
         for (i = 0; i < n; i++) {
             inout_pcm[i] = clamp_s16((int)inout_pcm[i] + (int)agent[i]);
         }

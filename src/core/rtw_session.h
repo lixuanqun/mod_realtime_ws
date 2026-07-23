@@ -53,6 +53,11 @@ int rtw_session_handle_peer_json(rtw_session_t *s, const char *json);
 /* Pop next outbound JSON frame (malloc'd). Caller frees. Returns 0 ok, -1 empty. */
 int rtw_session_pop_outbound(rtw_session_t *s, char **json_out);
 
+/* Peek / drop-head for send-without-lossy-pop flush paths. */
+void rtw_session_harvest_marks(rtw_session_t *s);
+int rtw_session_peek_outbound(rtw_session_t *s, const char **json_out, size_t *len_out);
+int rtw_session_drop_outbound_head(rtw_session_t *s);
+
 /* Read mulaw from playout for injection into call (simulates media bug write). */
 size_t rtw_session_read_playout(rtw_session_t *s, uint8_t *out, size_t max_len);
 

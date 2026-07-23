@@ -192,14 +192,14 @@ mod_realtime_ws/
 |---------|----------|--------|
 | Media path WS I/O | High | Fixed (enqueue-only) |
 | `do_stop` + `CLOSE` double-free | High | Fixed (idempotent stop) |
-| Fake `wss://` accept | High | Fixed → real OpenSSL `wss://` + smoke |
-| WRITE_REPLACE stub only | High | Coded `get/set_write_replace_frame` + `apply_write_frame` |
-| Raw UUID as callSid | Med | Fixed CA/MZ hex |
-| Metadata space-split | Med | Fixed `{…}` slice |
-| No reconnect | Med | Basic backoff reconnect + `rehandshake` (disable: `RTW_RECONNECT=0`) |
-| Record policy | Med | `record_injected` default documented |
-| Clear-latency SLO | Low | Still open |
-| Session-pool alloc | Low | Still `calloc` until live FS |
+| Flush dropped JSON when `!ws_ready` | High | Peek→send→drop; no pop until sent |
+| `SSL_write`/`send` partial writes ignored | High | `io_write_all` loop |
+| `SWITCH_ABC_TYPE_WRITE` called replace-frame APIs | High | Handle `WRITE_REPLACE` only |
+| Reconnect `usleep` blocked stop | Med | Interruptible backoff slices |
+| 64KB stack buffer in peer JSON path | Med | Heap allocate |
+| Stereo treated as mono interleaved | Med | Left-channel fold for L0 |
+| `inject_mode` read outside lock | Low | Read under same mutex as playout |
+| IPv6 URL host/`Host` header | Low | Bracket parsing + Host header |
 
 ### Env knobs
 

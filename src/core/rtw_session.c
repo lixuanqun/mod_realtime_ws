@@ -100,46 +100,57 @@ int rtw_session_push_pcm16(rtw_session_t *s, const int16_t *pcm, size_t nsamples
 int rtw_session_handle_peer_json(rtw_session_t *s, const char *json)
 {
     rtw_inbound_event_t ev;
-    uint8_t payload[64 * 1024];
+    uint8_t *payload;
+    const size_t payload_cap = 64 * 1024;
     char flushed[RTW_MARK_MAX][RTW_MARK_NAME_LEN];
     size_t nflush;
     size_t i;
+    int rc = -1;
     if (!s || !json || s->state != RTW_STATE_RUNNING) {
         return -1;
     }
-    if (rtw_parse_inbound(json, &ev, payload, sizeof(payload)) != 0) {
+    payload = (uint8_t *)malloc(payload_cap);
+    if (!payload) {
+        return -1;
+    }
+    if (rtw_parse_inbound(json, &ev, payload, payload_cap) != 0) {
+        free(payload);
         return -1;
     }
     if (ev.stream_sid[0] && strcmp(ev.stream_sid, s->stream_sid) != 0) {
-        /* wrong stream — ignore */
+        free(payload);
         return 1;
     }
     switch (ev.type) {
     case RTW_EVT_MEDIA:
         if (rtw_playout_write(&s->playout, ev.payload, ev.payload_len) != 0) {
-            return -2; /* overflow */
+            rc = -2;
+            break;
         }
         s->downlink_frames++;
+        rc = 0;
         break;
     case RTW_EVT_MARK:
-        if (rtw_playout_add_mark(&s->playout, ev.mark_name) != 0) {
-            return -1;
-        }
+        rc = rtw_playout_add_mark(&s->playout, ev.mark_name) == 0 ? 0 : -1;
         break;
     case RTW_EVT_CLEAR:
         nflush = rtw_playout_clear(&s->playout, flushed, RTW_MARK_MAX);
         s->clear_events++;
+        rc = 0;
         for (i = 0; i < nflush; i++) {
             char *ack = rtw_build_mark(s->stream_sid, flushed[i], s->seq++);
             if (enqueue_json(s, ack) != 0) {
-                return -1;
+                rc = -1;
+                break;
             }
         }
         break;
     default:
+        rc = 0;
         break;
     }
-    return 0;
+    free(payload);
+    return rc;
 }
 
 int rtw_session_pop_outbound(rtw_session_t *s, char **json_out)
@@ -162,6 +173,39 @@ int rtw_session_pop_outbound(rtw_session_t *s, char **json_out)
     }
     *json_out = item.data;
     return 0;
+}
+
+/* Harvest mark ACKs then peek/send-friendly accessors used by bridge flush. */
+void rtw_session_harvest_marks(rtw_session_t *s)
+{
+    char completed[8][RTW_MARK_NAME_LEN];
+    size_t n;
+    size_t i;
+    if (!s) {
+        return;
+    }
+    n = rtw_playout_pop_completed_marks(&s->playout, completed, 8);
+    for (i = 0; i < n; i++) {
+        char *ack = rtw_build_mark(s->stream_sid, completed[i], s->seq++);
+        enqueue_json(s, ack);
+    }
+}
+
+int rtw_session_peek_outbound(rtw_session_t *s, const char **json_out, size_t *len_out)
+{
+    if (!s) {
+        return -1;
+    }
+    rtw_session_harvest_marks(s);
+    return rtw_queue_peek(&s->outbound, json_out, len_out);
+}
+
+int rtw_session_drop_outbound_head(rtw_session_t *s)
+{
+    if (!s) {
+        return -1;
+    }
+    return rtw_queue_drop_head(&s->outbound);
 }
 
 size_t rtw_session_read_playout(rtw_session_t *s, uint8_t *out, size_t max_len)

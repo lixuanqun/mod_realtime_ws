@@ -76,6 +76,29 @@ int rtw_queue_pop(rtw_bounded_queue_t *q, rtw_queue_item_t *out)
     return 0;
 }
 
+int rtw_queue_peek(const rtw_bounded_queue_t *q, const char **data_out, size_t *len_out)
+{
+    if (!q || q->size == 0 || !data_out) {
+        return -1;
+    }
+    *data_out = q->items[q->head].data;
+    if (len_out) {
+        *len_out = q->items[q->head].len;
+    }
+    return 0;
+}
+
+int rtw_queue_drop_head(rtw_bounded_queue_t *q)
+{
+    if (!q || q->size == 0) {
+        return -1;
+    }
+    free_slot(&q->items[q->head]);
+    q->head = (q->head + 1) % q->capacity;
+    q->size--;
+    return 0;
+}
+
 size_t rtw_queue_size(const rtw_bounded_queue_t *q)
 {
     return q ? q->size : 0;

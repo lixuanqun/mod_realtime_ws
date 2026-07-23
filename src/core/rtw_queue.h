@@ -32,6 +32,12 @@ int rtw_queue_push(rtw_bounded_queue_t *q, const char *data, size_t len);
 /* Pops into *out (malloc'd). Caller frees out->data. Returns 0 ok, -1 empty. */
 int rtw_queue_pop(rtw_bounded_queue_t *q, rtw_queue_item_t *out);
 
+/* Peek head without removing. *data_out points at queue storage — valid until pop/destroy. */
+int rtw_queue_peek(const rtw_bounded_queue_t *q, const char **data_out, size_t *len_out);
+
+/* Drop head after successful send. Returns 0 ok, -1 empty. */
+int rtw_queue_drop_head(rtw_bounded_queue_t *q);
+
 size_t rtw_queue_size(const rtw_bounded_queue_t *q);
 
 #ifdef __cplusplus
