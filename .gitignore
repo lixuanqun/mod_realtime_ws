@@ -1,0 +1,30 @@
+# Build
+*.o
+*.lo
+*.la
+*.so
+*.a
+.libs/
+autom4te.cache/
+config.log
+config.status
+Makefile
+.deps/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Local env
+.env
+.env.*
+!.env.example
+
+# Captured audio / debug
+*.raw
+*.ulaw
+*.pcm
+/tmp/
