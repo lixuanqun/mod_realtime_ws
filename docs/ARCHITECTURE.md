@@ -124,12 +124,16 @@ uuid_realtime_ws <uuid> stop
 uuid_realtime_ws <uuid> pause | resume
 uuid_realtime_ws <uuid> clear
 uuid_realtime_ws <uuid> send_mark <name>
+uuid_realtime_ws <uuid> status
 ```
 
 - `mix-type`: `mono` | `mixed` | `stereo`
-- Metadata: optional JSON object; parser takes from the first `{` so spaces inside JSON are allowed.
-- `send_mark`: **local/test** helper — queues a peer-style mark against playout (not an FS→peer wire event).
-- **Lifecycle:** prefer Lua/ESL over ephemeral `${api(...)}` so the bug outlives the dialplan step.
+- Metadata: optional JSON; parser takes from the first `{`.
+  - Twilio `customParameters`: remaining object after stripping auth keys
+  - Auth: `"authorization":"Bearer …"` and/or `"ws_headers":{"X-Api-Key":"…"}` → HTTP upgrade headers
+- `send_mark`: **local/test** helper — queues a peer-style mark against playout
+- `status`: uplink/downlink/clear latency / queue depths
+- **Lifecycle:** prefer Lua/ESL over ephemeral `${api(...)}`
 
 ## 7. Threading & safety (MUST)
 

@@ -84,7 +84,7 @@ static void test_session_uplink_and_clear(void)
         pcm[i] = (int16_t)(i * 10);
     }
     RTW_CHECK(rtw_session_init(&s, 32, 8000) == 0);
-    RTW_CHECK(rtw_session_start(&s, "MZtest", "CAcall", "ACacc", NULL) == 0);
+    RTW_CHECK(rtw_session_start(&s, "MZtest", "CAcall", "ACacc", "{\"app\":\"x\"}") == 0);
     leftover = rtw_session_push_pcm16(&s, pcm, 320);
     RTW_CHECK(leftover == 0);
     RTW_CHECK(s.uplink_frames == 2);
@@ -95,6 +95,7 @@ static void test_session_uplink_and_clear(void)
     /* start */
     RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
     RTW_CHECK(strstr(json, "start"));
+    RTW_CHECK(strstr(json, "app"));
     free(json);
     /* media x2 */
     RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
@@ -123,12 +124,17 @@ static void test_session_uplink_and_clear(void)
     RTW_CHECK(strcmp(ev.mark_name, "utt1") == 0);
     free(json);
 
+    /* silent write samples clear latency */
+    rtw_session_note_write_after_clear(&s, 0);
+    RTW_CHECK(s.clear_latency_samples == 1);
+
     RTW_CHECK(rtw_session_rehandshake(&s) == 0);
     RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
     RTW_CHECK(strstr(json, "connected"));
     free(json);
     RTW_CHECK(rtw_session_pop_outbound(&s, &json) == 0);
     RTW_CHECK(strstr(json, "start"));
+    RTW_CHECK(strstr(json, "app"));
     free(json);
 
     RTW_CHECK(rtw_session_stop(&s) == 0);

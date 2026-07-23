@@ -4,6 +4,45 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void record_clear_latency(rtw_session_t *s, uint64_t us)
+{
+    unsigned bucket;
+    s->clear_latency_last_us = us;
+    if (us > s->clear_latency_max_us) {
+        s->clear_latency_max_us = us;
+    }
+    s->clear_latency_sum_us += us;
+    s->clear_latency_samples++;
+    if (us < 1000) {
+        bucket = 0;
+    } else if (us < 2000) {
+        bucket = 1;
+    } else if (us < 5000) {
+        bucket = 2;
+    } else if (us < 10000) {
+        bucket = 3;
+    } else if (us < 20000) {
+        bucket = 4;
+    } else if (us < 50000) {
+        bucket = 5;
+    } else if (us < 100000) {
+        bucket = 6;
+    } else {
+        bucket = 7;
+    }
+    s->clear_latency_buckets[bucket]++;
+}
 
 int rtw_session_init(rtw_session_t *s, size_t out_queue_cap, size_t playout_cap)
 {
@@ -27,6 +66,8 @@ void rtw_session_destroy(rtw_session_t *s)
     if (!s) {
         return;
     }
+    free(s->custom_params);
+    s->custom_params = NULL;
     rtw_queue_destroy(&s->outbound);
     rtw_playout_destroy(&s->playout);
     memset(s, 0, sizeof(*s));
@@ -55,6 +96,14 @@ int rtw_session_start(rtw_session_t *s, const char *stream_sid, const char *call
     snprintf(s->call_sid, sizeof(s->call_sid), "%s", call_sid ? call_sid : stream_sid);
     snprintf(s->account_sid, sizeof(s->account_sid), "%s",
              account_sid ? account_sid : "AC00000000000000000000000000000000");
+    free(s->custom_params);
+    s->custom_params = NULL;
+    if (custom_params_json && custom_params_json[0]) {
+        s->custom_params = strdup(custom_params_json);
+        if (!s->custom_params) {
+            return -1;
+        }
+    }
     s->seq = 1;
     s->chunk = 1;
     s->timestamp_ms = 0;
@@ -63,7 +112,7 @@ int rtw_session_start(rtw_session_t *s, const char *stream_sid, const char *call
     if (enqueue_json(s, connected) != 0) {
         return -1;
     }
-    start = rtw_build_start(s->stream_sid, s->account_sid, s->call_sid, custom_params_json, s->seq++);
+    start = rtw_build_start(s->stream_sid, s->account_sid, s->call_sid, s->custom_params, s->seq++);
     if (enqueue_json(s, start) != 0) {
         return -1;
     }
@@ -94,7 +143,7 @@ int rtw_session_push_pcm16(rtw_session_t *s, const int16_t *pcm, size_t nsamples
         s->uplink_frames++;
         offset += RTW_FRAME_MULAW_BYTES;
     }
-    return (int)(nsamples - offset); /* leftover samples not consumed */
+    return (int)(nsamples - offset);
 }
 
 int rtw_session_handle_peer_json(rtw_session_t *s, const char *json)
@@ -136,6 +185,8 @@ int rtw_session_handle_peer_json(rtw_session_t *s, const char *json)
     case RTW_EVT_CLEAR:
         nflush = rtw_playout_clear(&s->playout, flushed, RTW_MARK_MAX);
         s->clear_events++;
+        s->clear_armed = 1;
+        s->clear_start_ns = mono_ns();
         rc = 0;
         for (i = 0; i < nflush; i++) {
             char *ack = rtw_build_mark(s->stream_sid, flushed[i], s->seq++);
@@ -162,7 +213,6 @@ int rtw_session_pop_outbound(rtw_session_t *s, char **json_out)
     if (!s || !json_out) {
         return -1;
     }
-    /* Harvest naturally completed marks into outbound ACKs before pop. */
     n = rtw_playout_pop_completed_marks(&s->playout, completed, 8);
     for (i = 0; i < n; i++) {
         char *ack = rtw_build_mark(s->stream_sid, completed[i], s->seq++);
@@ -175,7 +225,6 @@ int rtw_session_pop_outbound(rtw_session_t *s, char **json_out)
     return 0;
 }
 
-/* Harvest mark ACKs then peek/send-friendly accessors used by bridge flush. */
 void rtw_session_harvest_marks(rtw_session_t *s)
 {
     char completed[8][RTW_MARK_NAME_LEN];
@@ -216,6 +265,22 @@ size_t rtw_session_read_playout(rtw_session_t *s, uint8_t *out, size_t max_len)
     return rtw_playout_read(&s->playout, out, max_len);
 }
 
+void rtw_session_note_write_after_clear(rtw_session_t *s, size_t playout_samples_written)
+{
+    uint64_t now;
+    uint64_t us;
+    if (!s || !s->clear_armed) {
+        return;
+    }
+    if (playout_samples_written != 0) {
+        return; /* still draining unexpected data */
+    }
+    now = mono_ns();
+    us = s->clear_start_ns ? (now - s->clear_start_ns) / 1000ull : 0;
+    record_clear_latency(s, us);
+    s->clear_armed = 0;
+}
+
 int rtw_session_stop(rtw_session_t *s)
 {
     char *stop;
@@ -242,7 +307,7 @@ int rtw_session_rehandshake(rtw_session_t *s)
     if (enqueue_json(s, connected) != 0) {
         return -1;
     }
-    start = rtw_build_start(s->stream_sid, s->account_sid, s->call_sid, NULL, s->seq++);
+    start = rtw_build_start(s->stream_sid, s->account_sid, s->call_sid, s->custom_params, s->seq++);
     if (enqueue_json(s, start) != 0) {
         return -1;
     }

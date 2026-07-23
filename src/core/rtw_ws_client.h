@@ -18,11 +18,19 @@ typedef void (*rtw_ws_on_close_fn)(void *userdata, int code);
  *
  * TLS verify: enabled by default for wss://. Set env RTW_TLS_INSECURE=1
  * (or call rtw_ws_set_tls_insecure(1)) to skip certificate verification — lab only.
+ *
+ * extra_headers: optional raw header block, each line ending with \\r\\n,
+ * e.g. "Authorization: Bearer tok\\r\\nX-Api-Key: abc\\r\\n"
  */
 void rtw_ws_set_tls_insecure(int insecure);
 
 rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
                                 rtw_ws_on_close_fn on_close, void *userdata);
+
+rtw_ws_client_t *rtw_ws_connect_ex(const char *url, const char *extra_headers,
+                                   rtw_ws_on_text_fn on_text, rtw_ws_on_close_fn on_close,
+                                   void *userdata);
+
 void rtw_ws_close(rtw_ws_client_t *c);
 
 int rtw_ws_send_text(rtw_ws_client_t *c, const char *text, size_t len);

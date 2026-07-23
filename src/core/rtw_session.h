@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 #define RTW_FRAME_MULAW_BYTES 160 /* 20ms @ 8kHz */
+#define RTW_CLEAR_LAT_BUCKETS 8
 
 typedef enum {
     RTW_STATE_IDLE = 0,
@@ -26,6 +27,7 @@ typedef struct {
     char stream_sid[RTW_SID_MAX];
     char call_sid[RTW_SID_MAX];
     char account_sid[RTW_SID_MAX];
+    char *custom_params; /* owned; reused on rehandshake */
     rtw_session_state_t state;
     uint32_t seq;
     uint32_t chunk;
@@ -36,6 +38,14 @@ typedef struct {
     uint64_t uplink_frames;
     uint64_t downlink_frames;
     uint64_t clear_events;
+    /* Clear → first silent write latency (monotonic ns) */
+    int clear_armed;
+    uint64_t clear_start_ns;
+    uint64_t clear_latency_last_us;
+    uint64_t clear_latency_max_us;
+    uint64_t clear_latency_sum_us;
+    uint64_t clear_latency_samples;
+    uint64_t clear_latency_buckets[RTW_CLEAR_LAT_BUCKETS]; /* <1,<2,<5,<10,<20,<50,<100,>=100 ms */
 } rtw_session_t;
 
 int rtw_session_init(rtw_session_t *s, size_t out_queue_cap, size_t playout_cap);
@@ -60,6 +70,9 @@ int rtw_session_drop_outbound_head(rtw_session_t *s);
 
 /* Read mulaw from playout for injection into call (simulates media bug write). */
 size_t rtw_session_read_playout(rtw_session_t *s, uint8_t *out, size_t max_len);
+
+/* Call after a write/inject attempt to complete clear-latency sample when armed. */
+void rtw_session_note_write_after_clear(rtw_session_t *s, size_t playout_samples_written);
 
 int rtw_session_stop(rtw_session_t *s);
 

@@ -1,0 +1,14 @@
+<!--
+  Sample autoload snippet for FreeSWITCH (copy under conf/autoload_configs/).
+  Settings are documented for operators; the module currently reads env knobs
+  (RTW_*) and start metadata. Future builds may parse this XML via switch_xml.
+-->
+<configuration name="realtime_ws.conf" description="mod_realtime_ws defaults">
+  <settings>
+    <!-- Prefer wss in production once certs are trusted (no RTW_TLS_INSECURE). -->
+    <param name="default-inject-mode" value="replace"/> <!-- replace | mix -->
+    <param name="reconnect" value="true"/>
+    <param name="reconnect-max" value="10"/>
+    <param name="record-injected" value="true"/>
+  </settings>
+</configuration>

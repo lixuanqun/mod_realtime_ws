@@ -42,6 +42,8 @@ typedef struct rtw_tech_private {
     char call_sid[RTW_SID_MAX];
     char ws_uri[RTW_MAX_WS_URI];
     char metadata[RTW_MAX_META];
+    char *extra_headers;      /* owned; Authorization / ws_headers for handshake */
+    char *peer_custom_params; /* owned; metadata minus auth keys for Twilio start */
     int sampling; /* source rate from FS; L0 wire is always 8k mulaw */
     int channels;
     int audio_paused;
@@ -64,6 +66,25 @@ typedef struct rtw_tech_private {
     int record_injected; /* 1 = WRITE_REPLACE audio expected in record_session path */
 } rtw_tech_t;
 
+typedef struct {
+    char stream_sid[RTW_SID_MAX];
+    char call_sid[RTW_SID_MAX];
+    int ws_ready;
+    int reconnect_enabled;
+    uint64_t reconnect_ok;
+    uint64_t uplink_frames;
+    uint64_t downlink_frames;
+    uint64_t clear_events;
+    uint64_t clear_latency_last_us;
+    uint64_t clear_latency_max_us;
+    uint64_t clear_latency_avg_us;
+    uint64_t clear_latency_samples;
+    size_t outbound_queue;
+    size_t playout_bytes;
+    int record_injected;
+    int inject_mode;
+} rtw_bridge_stats_t;
+
 /* Bridge API used by module + harness (no proprietary audio_stream code). */
 switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_uri, int sampling,
                                  int channels, const char *metadata, rtw_tech_t **out_tech);
@@ -71,6 +92,7 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
 switch_status_t rtw_bridge_pause(rtw_tech_t *tech, int pause);
 switch_status_t rtw_bridge_clear(rtw_tech_t *tech);
 switch_status_t rtw_bridge_send_mark(rtw_tech_t *tech, const char *name);
+switch_status_t rtw_bridge_get_stats(rtw_tech_t *tech, rtw_bridge_stats_t *out);
 
 /* Media-bug READ path: feed L16 PCM (mono interleaved). */
 switch_bool_t rtw_bridge_on_read_pcm16(rtw_tech_t *tech, const int16_t *pcm, size_t nsamples);
@@ -90,5 +112,6 @@ int rtw_validate_ws_uri(const char *url, char *out, size_t out_cap);
 switch_status_t rtw_mod_start_capture(switch_core_session_t *session, switch_media_bug_flag_t flags,
                                       char *ws_uri, int sampling, char *metadata);
 switch_status_t rtw_mod_stop_capture(switch_core_session_t *session);
+rtw_tech_t *rtw_mod_get_tech(switch_core_session_t *session);
 
 #endif

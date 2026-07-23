@@ -1,5 +1,6 @@
 #include "mod_realtime_ws.h"
 #include "rtw_mulaw.h"
+#include "cJSON.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -100,7 +101,7 @@ static int try_reconnect(rtw_tech_t *tech)
         rtw_ws_close(tech->ws);
         tech->ws = NULL;
     }
-    tech->ws = rtw_ws_connect(tech->ws_uri, on_ws_text, on_ws_close, tech);
+    tech->ws = rtw_ws_connect_ex(tech->ws_uri, tech->extra_headers, on_ws_text, on_ws_close, tech);
     if (!tech->ws) {
         return -1;
     }
@@ -237,6 +238,97 @@ static int16_t clamp_s16(int v)
     return (int16_t)v;
 }
 
+/*
+ * Split start metadata JSON into:
+ *  - extra_headers for WS handshake (authorization / ws_headers)
+ *  - peer customParameters (remaining object, auth keys stripped)
+ * Both outputs are malloc'd (or NULL). Returns 0 ok.
+ */
+static int split_metadata(const char *metadata, char **extra_headers_out, char **peer_params_out)
+{
+    cJSON *root;
+    cJSON *auth;
+    cJSON *headers;
+    cJSON *item;
+    char *hdr = NULL;
+    size_t hdr_cap = 0;
+    size_t hdr_len = 0;
+    *extra_headers_out = NULL;
+    *peer_params_out = NULL;
+    if (!metadata || !metadata[0]) {
+        return 0;
+    }
+    root = cJSON_Parse(metadata);
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        /* Non-JSON metadata: treat whole string as opaque custom param object wrapper */
+        *peer_params_out = strdup(metadata);
+        return *peer_params_out ? 0 : -1;
+    }
+
+    auth = cJSON_GetObjectItemCaseSensitive(root, "authorization");
+    if (cJSON_IsString(auth) && auth->valuestring && auth->valuestring[0]) {
+        size_t need = strlen(auth->valuestring) + 32;
+        char *line = (char *)malloc(need);
+        if (!line) {
+            cJSON_Delete(root);
+            return -1;
+        }
+        snprintf(line, need, "Authorization: %s\r\n", auth->valuestring);
+        hdr = line;
+        hdr_len = strlen(hdr);
+        hdr_cap = need;
+        cJSON_DeleteItemFromObject(root, "authorization");
+    }
+
+    headers = cJSON_GetObjectItemCaseSensitive(root, "ws_headers");
+    if (cJSON_IsObject(headers)) {
+        cJSON_ArrayForEach(item, headers)
+        {
+            const char *key = item->string;
+            const char *val = cJSON_IsString(item) ? item->valuestring : NULL;
+            size_t need;
+            char *nbuf;
+            if (!key || !val) {
+                continue;
+            }
+            need = hdr_len + strlen(key) + strlen(val) + 8;
+            nbuf = (char *)realloc(hdr, need);
+            if (!nbuf) {
+                free(hdr);
+                cJSON_Delete(root);
+                return -1;
+            }
+            hdr = nbuf;
+            hdr_cap = need;
+            (void)hdr_cap;
+            snprintf(hdr + hdr_len, need - hdr_len, "%s: %s\r\n", key, val);
+            hdr_len = strlen(hdr);
+        }
+        cJSON_DeleteItemFromObject(root, "ws_headers");
+    }
+
+    if (hdr && hdr[0]) {
+        *extra_headers_out = hdr;
+    } else {
+        free(hdr);
+    }
+
+    if (cJSON_GetArraySize(root) > 0 || root->child) {
+        *peer_params_out = cJSON_PrintUnformatted(root);
+    }
+    cJSON_Delete(root);
+    return 0;
+}
+
+static void tech_free_meta(rtw_tech_t *tech)
+{
+    free(tech->extra_headers);
+    tech->extra_headers = NULL;
+    free(tech->peer_custom_params);
+    tech->peer_custom_params = NULL;
+}
+
 switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_uri, int sampling,
                                  int channels, const char *metadata, rtw_tech_t **out_tech)
 {
@@ -286,22 +378,32 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     snprintf(tech->stream_sid, sizeof(tech->stream_sid), "%s", sid);
     snprintf(tech->call_sid, sizeof(tech->call_sid), "%s", call_sid);
 
-    if (rtw_session_init(&tech->session, 256, 64 * 1024) != 0) {
-        switch_mutex_destroy(tech->mutex);
-        free(tech);
-        return SWITCH_STATUS_FALSE;
-    }
-    if (rtw_session_start(&tech->session, tech->stream_sid, tech->call_sid, "ACmodrealtimews0000000000000000000",
-                          tech->metadata[0] ? tech->metadata : NULL) != 0) {
-        rtw_session_destroy(&tech->session);
+    if (split_metadata(tech->metadata[0] ? tech->metadata : NULL, &tech->extra_headers,
+                       &tech->peer_custom_params) != 0) {
         switch_mutex_destroy(tech->mutex);
         free(tech);
         return SWITCH_STATUS_FALSE;
     }
 
-    tech->ws = rtw_ws_connect(ws_uri, on_ws_text, on_ws_close, tech);
+    if (rtw_session_init(&tech->session, 256, 64 * 1024) != 0) {
+        tech_free_meta(tech);
+        switch_mutex_destroy(tech->mutex);
+        free(tech);
+        return SWITCH_STATUS_FALSE;
+    }
+    if (rtw_session_start(&tech->session, tech->stream_sid, tech->call_sid, "ACmodrealtimews0000000000000000000",
+                          tech->peer_custom_params) != 0) {
+        rtw_session_destroy(&tech->session);
+        tech_free_meta(tech);
+        switch_mutex_destroy(tech->mutex);
+        free(tech);
+        return SWITCH_STATUS_FALSE;
+    }
+
+    tech->ws = rtw_ws_connect_ex(ws_uri, tech->extra_headers, on_ws_text, on_ws_close, tech);
     if (!tech->ws) {
         rtw_session_destroy(&tech->session);
+        tech_free_meta(tech);
         switch_mutex_destroy(tech->mutex);
         free(tech);
         return SWITCH_STATUS_FALSE;
@@ -312,6 +414,7 @@ switch_status_t rtw_bridge_start(switch_core_session_t *session, const char *ws_
     if (pthread_create(&tech->worker, NULL, ws_worker, tech) != 0) {
         rtw_ws_close(tech->ws);
         rtw_session_destroy(&tech->session);
+        tech_free_meta(tech);
         switch_mutex_destroy(tech->mutex);
         free(tech);
         return SWITCH_STATUS_FALSE;
@@ -353,6 +456,7 @@ switch_status_t rtw_bridge_stop(switch_core_session_t *session, rtw_tech_t *tech
         tech->ws_ready = 0;
     }
     rtw_session_destroy(&tech->session);
+    tech_free_meta(tech);
     if (tech->mutex) {
         switch_mutex_destroy(tech->mutex);
         tech->mutex = NULL;
@@ -474,6 +578,8 @@ size_t rtw_bridge_on_write_pcm16(rtw_tech_t *tech, int16_t *out, size_t max_samp
     n = rtw_session_read_playout(&tech->session, mulaw, want);
     if (n > 0) {
         rtw_mulaw_to_pcm16(mulaw, n, out);
+    } else {
+        rtw_session_note_write_after_clear(&tech->session, 0);
     }
     switch_mutex_unlock(tech->mutex);
     return n;
@@ -498,6 +604,8 @@ size_t rtw_bridge_apply_write_frame(rtw_tech_t *tech, int16_t *inout_pcm, size_t
     n = rtw_session_read_playout(&tech->session, mulaw, want);
     if (n > 0) {
         rtw_mulaw_to_pcm16(mulaw, n, agent);
+    } else {
+        rtw_session_note_write_after_clear(&tech->session, 0);
     }
     switch_mutex_unlock(tech->mutex);
     if (n == 0) {
@@ -514,4 +622,36 @@ size_t rtw_bridge_apply_write_frame(rtw_tech_t *tech, int16_t *inout_pcm, size_t
         }
     }
     return n;
+}
+
+switch_status_t rtw_bridge_get_stats(rtw_tech_t *tech, rtw_bridge_stats_t *out)
+{
+    if (!tech || !out || tech->cleanup_started) {
+        return SWITCH_STATUS_FALSE;
+    }
+    memset(out, 0, sizeof(*out));
+    if (switch_mutex_lock(tech->mutex) != SWITCH_STATUS_SUCCESS) {
+        return SWITCH_STATUS_FALSE;
+    }
+    snprintf(out->stream_sid, sizeof(out->stream_sid), "%s", tech->stream_sid);
+    snprintf(out->call_sid, sizeof(out->call_sid), "%s", tech->call_sid);
+    out->ws_ready = tech->ws_ready;
+    out->reconnect_enabled = tech->reconnect_enabled;
+    out->reconnect_ok = tech->reconnect_ok;
+    out->uplink_frames = tech->session.uplink_frames;
+    out->downlink_frames = tech->session.downlink_frames;
+    out->clear_events = tech->session.clear_events;
+    out->clear_latency_last_us = tech->session.clear_latency_last_us;
+    out->clear_latency_max_us = tech->session.clear_latency_max_us;
+    out->clear_latency_samples = tech->session.clear_latency_samples;
+    if (tech->session.clear_latency_samples) {
+        out->clear_latency_avg_us =
+            tech->session.clear_latency_sum_us / tech->session.clear_latency_samples;
+    }
+    out->outbound_queue = rtw_queue_size(&tech->session.outbound);
+    out->playout_bytes = rtw_playout_size(&tech->session.playout);
+    out->record_injected = tech->record_injected;
+    out->inject_mode = (int)tech->inject_mode;
+    switch_mutex_unlock(tech->mutex);
+    return SWITCH_STATUS_SUCCESS;
 }

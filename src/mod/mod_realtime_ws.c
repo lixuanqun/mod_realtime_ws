@@ -167,7 +167,7 @@ static char *extract_metadata_json(char *cmd)
 }
 
 #define RTW_API_SYNTAX \
-    "<uuid> [start|stop|pause|resume|clear|send_mark] [ws-url] [mono|mixed|stereo] [8k|16k] [{metadata-json}]"
+    "<uuid> [start|stop|pause|resume|clear|send_mark|status] [ws-url] [mono|mixed|stereo] [8k|16k] [{metadata-json}]"
 
 SWITCH_STANDARD_API(uuid_realtime_ws_function)
 {
@@ -176,6 +176,7 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
     int argc = 0;
     switch_status_t status = SWITCH_STATUS_FALSE;
     char *metadata = NULL;
+    int printed_detail = 0;
 
     if (zstr(cmd)) {
         stream->write_function(stream, "-USAGE: %s\n", RTW_API_SYNTAX);
@@ -225,6 +226,29 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
             switch_media_bug_t *bug = switch_channel_get_private(ch, RTW_BUG_NAME);
             rtw_tech_t *tech = bug ? (rtw_tech_t *)switch_core_media_bug_get_user_data(bug) : NULL;
             status = (tech && argc > 2) ? rtw_bridge_send_mark(tech, argv[2]) : SWITCH_STATUS_FALSE;
+        } else if (!strcasecmp(argv[1], "status")) {
+            switch_channel_t *ch = switch_core_session_get_channel(lsession);
+            switch_media_bug_t *bug = switch_channel_get_private(ch, RTW_BUG_NAME);
+            rtw_tech_t *tech = bug ? (rtw_tech_t *)switch_core_media_bug_get_user_data(bug) : NULL;
+            rtw_bridge_stats_t st;
+            if (tech && rtw_bridge_get_stats(tech, &st) == SWITCH_STATUS_SUCCESS) {
+                stream->write_function(
+                    stream,
+                    "+OK streamSid=%s callSid=%s ws_ready=%d uplink=%llu downlink=%llu clears=%llu "
+                    "clear_last_us=%llu clear_max_us=%llu clear_avg_us=%llu clear_samples=%llu "
+                    "q=%zu playout=%zu reconnects=%llu inject=%d record_injected=%d\n",
+                    st.stream_sid, st.call_sid, st.ws_ready, (unsigned long long)st.uplink_frames,
+                    (unsigned long long)st.downlink_frames, (unsigned long long)st.clear_events,
+                    (unsigned long long)st.clear_latency_last_us,
+                    (unsigned long long)st.clear_latency_max_us,
+                    (unsigned long long)st.clear_latency_avg_us,
+                    (unsigned long long)st.clear_latency_samples, st.outbound_queue, st.playout_bytes,
+                    (unsigned long long)st.reconnect_ok, st.inject_mode, st.record_injected);
+                status = SWITCH_STATUS_SUCCESS;
+                printed_detail = 1;
+            } else {
+                status = SWITCH_STATUS_FALSE;
+            }
         } else if (!strcasecmp(argv[1], "start")) {
             char wsUri[RTW_MAX_WS_URI];
             int sampling = 8000;
@@ -282,7 +306,9 @@ SWITCH_STANDARD_API(uuid_realtime_ws_function)
 #endif
 
     if (status == SWITCH_STATUS_SUCCESS) {
-        stream->write_function(stream, "+OK Success\n");
+        if (!printed_detail) {
+            stream->write_function(stream, "+OK Success\n");
+        }
     } else {
         stream->write_function(stream, "-ERR Operation Failed\n");
     }
@@ -303,6 +329,31 @@ switch_status_t rtw_mod_stop_capture(switch_core_session_t *session)
     return do_stop(session);
 }
 
+rtw_tech_t *rtw_mod_get_tech(switch_core_session_t *session)
+{
+    switch_channel_t *channel;
+    void *priv;
+    if (!session) {
+        return NULL;
+    }
+    channel = switch_core_session_get_channel(session);
+    if (!channel) {
+        return NULL;
+    }
+    priv = switch_channel_get_private(channel, RTW_BUG_NAME);
+    if (!priv) {
+        return NULL;
+    }
+#ifdef HAVE_FREESWITCH
+    {
+        switch_media_bug_t *bug = (switch_media_bug_t *)priv;
+        return (rtw_tech_t *)switch_core_media_bug_get_user_data(bug);
+    }
+#else
+    return (rtw_tech_t *)priv;
+#endif
+}
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_realtime_ws_load)
 {
     switch_api_interface_t *api_interface = NULL;
@@ -316,6 +367,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_realtime_ws_load)
     switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid start");
     switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid stop");
     switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid clear");
+    switch_console_set_complete("add uuid_realtime_ws ::console::list_uuid status");
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_realtime_ws loaded\n");
     return SWITCH_STATUS_SUCCESS;
 }

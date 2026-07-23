@@ -131,6 +131,7 @@ int main(int argc, char **argv)
     {
         int16_t frame[160];
         size_t s, n;
+        rtw_bridge_stats_t st;
         for (s = 0; s < 160; s++) {
             frame[s] = 42;
         }
@@ -139,6 +140,22 @@ int main(int argc, char **argv)
             fprintf(stderr, "harness: expected passthrough after clear\n");
             goto out;
         }
+        if (rtw_bridge_get_stats(tech, &st) != SWITCH_STATUS_SUCCESS) {
+            fprintf(stderr, "harness: stats failed\n");
+            goto out;
+        }
+        if (st.clear_events < 1) {
+            fprintf(stderr, "harness: expected clear_events>=1\n");
+            goto out;
+        }
+        if (st.clear_latency_samples < 1) {
+            fprintf(stderr, "harness: clear latency not sampled\n");
+            goto out;
+        }
+        fprintf(stderr, "harness: clear_last_us=%llu clear_max_us=%llu samples=%llu\n",
+                (unsigned long long)st.clear_latency_last_us,
+                (unsigned long long)st.clear_latency_max_us,
+                (unsigned long long)st.clear_latency_samples);
     }
 
     if (rtw_mod_stop_capture(session) != SWITCH_STATUS_SUCCESS) {

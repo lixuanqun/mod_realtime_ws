@@ -27,6 +27,7 @@ struct rtw_ws_client {
     size_t rx_cap;
     int closed;
     int use_tls;
+    char *extra_headers; /* owned copy, may be NULL */
 #ifdef RTW_HAS_OPENSSL
     SSL_CTX *ssl_ctx;
     SSL *ssl;
@@ -180,11 +181,13 @@ static ssize_t io_read(rtw_ws_client_t *c, void *buf, size_t len)
 
 static int http_handshake(rtw_ws_client_t *c, const char *host, int port, const char *path)
 {
-    char req[1280];
+    char *req = NULL;
     char buf[2048];
     char host_hdr[300];
     size_t nread = 0;
+    size_t need;
     int n;
+    const char *extra = c->extra_headers ? c->extra_headers : "";
     /* Bracket IPv6 literals in Host header. */
     if (strchr(host, ':')) {
         snprintf(host_hdr, sizeof(host_hdr), "[%s]:%d", host, port);
@@ -193,18 +196,26 @@ static int http_handshake(rtw_ws_client_t *c, const char *host, int port, const 
     } else {
         snprintf(host_hdr, sizeof(host_hdr), "%s:%d", host, port);
     }
-    snprintf(req, sizeof(req),
+    need = strlen(path) + strlen(host_hdr) + strlen(extra) + 256;
+    req = (char *)malloc(need);
+    if (!req) {
+        return -1;
+    }
+    snprintf(req, need,
              "GET %s HTTP/1.1\r\n"
              "Host: %s\r\n"
              "Upgrade: websocket\r\n"
              "Connection: Upgrade\r\n"
              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
              "Sec-WebSocket-Version: 13\r\n"
+             "%s"
              "\r\n",
-             path, host_hdr);
+             path, host_hdr, extra);
     if (io_write_all(c, req, strlen(req)) < 0) {
+        free(req);
         return -1;
     }
+    free(req);
     while (nread < sizeof(buf) - 1) {
         n = (int)io_read(c, buf + nread, sizeof(buf) - 1 - nread);
         if (n <= 0) {
@@ -275,6 +286,13 @@ static int tls_setup(rtw_ws_client_t *c, const char *host)
 rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
                                 rtw_ws_on_close_fn on_close, void *userdata)
 {
+    return rtw_ws_connect_ex(url, NULL, on_text, on_close, userdata);
+}
+
+rtw_ws_client_t *rtw_ws_connect_ex(const char *url, const char *extra_headers,
+                                   rtw_ws_on_text_fn on_text, rtw_ws_on_close_fn on_close,
+                                   void *userdata)
+{
     char host[256], path[512];
     int port = 80;
     int use_tls = 0;
@@ -319,10 +337,19 @@ rtw_ws_client_t *rtw_ws_connect(const char *url, rtw_ws_on_text_fn on_text,
     c->on_text = on_text;
     c->on_close = on_close;
     c->userdata = userdata;
+    if (extra_headers && extra_headers[0]) {
+        c->extra_headers = strdup(extra_headers);
+        if (!c->extra_headers) {
+            close(fd);
+            free(c);
+            return NULL;
+        }
+    }
     c->rx_cap = 65536;
     c->rx = (uint8_t *)malloc(c->rx_cap);
     if (!c->rx) {
         close(fd);
+        free(c->extra_headers);
         free(c);
         return NULL;
     }
@@ -365,6 +392,7 @@ void rtw_ws_close(rtw_ws_client_t *c)
         close(c->fd);
         c->fd = -1;
     }
+    free(c->extra_headers);
     free(c->rx);
     free(c);
 }

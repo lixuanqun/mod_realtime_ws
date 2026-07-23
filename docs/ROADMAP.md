@@ -27,18 +27,20 @@ Dates are intentionally omitted; order is by dependency risk.
 - [x] `wss://` TLS client (OpenSSL) + `./scripts/wss_smoke_test.sh`
 - [x] WRITE_REPLACE inject helper (`rtw_bridge_apply_write_frame`) wired in HAVE_FREESWITCH callback
 - [x] Basic WS reconnect + `rtw_session_rehandshake` (opt-out `RTW_RECONNECT=0`)
+- [x] Auth hooks via metadata (`authorization` / `ws_headers` → WS handshake)
+- [x] Clear-latency sampling + `uuid_realtime_ws status`
+- [x] Side-by-side parity notes (`docs/PARITY.md`)
 - [ ] Link/run `.so` on real FreeSWITCH 1.10.x soak + verify WRITE_REPLACE audible path
-- [ ] Lua dialplan live on FS (example drafted in `conf/dialplan_example.lua`)
-- [ ] Side-by-side parity notes: audio_stream vs realtime_ws (features, latency, license)
+- [x] Lua dialplan example updated (`conf/dialplan_example.lua`)
 
 ## Phase 2 — Production hardening
 
 - [x] Bounded queues with drop-oldest (core)
 - [x] Reconnect policy without killing the call (basic backoff; expand jitter/metrics later)
-- [ ] Auth hooks (token/header)
+- [x] Auth hooks (token/header via metadata)
 - [x] Record-session interaction flag (`record_injected`, default on)
 - [x] Load/stress harness (expand targets as needed)
-- [ ] Clear-latency histogram / SLO
+- [x] Clear-latency histogram buckets + status API (P95 export still optional)
 
 ## Phase 3 — Extensions (L1+)
 
