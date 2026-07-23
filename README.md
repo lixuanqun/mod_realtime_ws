@@ -33,16 +33,28 @@ Existing backends written for Twilio Media Streams can connect to FreeSWITCH wit
 ## Features (planned)
 
 - [x] Architecture & protocol compatibility docs
-- [ ] Out-of-tree FreeSWITCH module (`mod_realtime_ws`)
-- [ ] Client mode: FS opens `wss://` to your server
-- [ ] Unidirectional + bidirectional audio
-- [ ] Twilio-compatible JSON events + base64 mulaw/8000
-- [ ] `mark` / `clear` (barge-in)
-- [ ] Session-safe media bug lifecycle (Lua/ESL friendly)
-- [ ] Bounded queues, metrics hooks
+- [x] Portable L0 core (Twilio JSON, mulaw/8k, mark/clear, bounded queue)
+- [x] `rtw_sim` + Node mock smoke / stress tests
+- [x] FreeSWITCH module API skeleton (`make mod-stub`)
+- [ ] Out-of-tree FreeSWITCH `.so` with media bug + WS worker
+- [ ] Client mode: FS opens `wss://` to your server (TLS)
 - [ ] Optional: binary L16 frames, multi-sink, WS server mode
 
 Non-goals for v1: embedding OpenAI/Gemini/Deepgram SDKs inside the module; video; replacing RTP.
+
+---
+
+## Build & test
+
+```bash
+make unit                 # C unit tests
+make sim                  # build rtw_sim
+make mod-stub             # compile-check FS module skeleton
+./scripts/smoke_test.sh   # unit + echo + clear over WebSocket
+CONCURRENCY=50 SECONDS_RUN=5 ./scripts/stress_test.sh
+```
+
+Requires: `gcc`, `make`, `node`/`npm` (for mock peer). FreeSWITCH headers are **not** required for core/sim tests.
 
 ---
 
@@ -60,17 +72,17 @@ This project **implements a compatible dialect**. It is not affiliated with or e
 
 ---
 
-## Quick start (when code lands)
+## Quick start (simulator today / FS module next)
 
 ```bash
-# placeholder — build instructions will land with Phase 1
-make
-# load in FreeSWITCH
-load mod_realtime_ws
-uuid_realtime_ws <uuid> start wss://your.example/stream mono 8k
+make unit && make sim
+# terminal A
+MODE=echo PORT=8081 node examples/node-mock-server/server.js
+# terminal B
+./build/rtw_sim --url ws://127.0.0.1:8081/media --seconds 2
 ```
 
-API shape (draft):
+FreeSWITCH API shape (draft, skeleton registered in `src/mod/mod_realtime_ws.c`):
 
 ```text
 uuid_realtime_ws <uuid> start <wss-url> <mix-type> <rate> [metadata-json]

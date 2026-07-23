@@ -1,0 +1,9 @@
+{
+  "name": "mod-realtime-ws-mock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Twilio Media Streams compatible mock peer for mod_realtime_ws tests",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
