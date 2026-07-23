@@ -9,6 +9,49 @@
 3. Exposes a **Twilio Media Streams–compatible** WebSocket message dialect so existing AI bridges can reconnect from Twilio to self-hosted FreeSWITCH with minimal change.
 4. Keeps **vendor AI protocols** (OpenAI Realtime, Gemini Live, Alibaba ISI, Volcengine, etc.) out of the module — those belong in a gateway process.
 
+### Positioning vs [mod_audio_stream](https://github.com/amigniter/mod_audio_stream)
+
+**Learn from it. Do not clone it. Surpass it.**
+
+`mod_audio_stream` is the most battle-tested FS→WebSocket audio fork in the wild. We treat it as the **engineering baseline** for media-bug lifecycle, duplex playback, and concurrency hardness — then win on **protocol openness, license, barge-in semantics, and ecosystem fit**.
+
+#### What we deliberately reuse (ideas / patterns, not code)
+
+| Pattern from mod_audio_stream | Why it matters |
+|-------------------------------|----------------|
+| Media bug as the tap point | Correct place to fork RTP without replacing the SIP path |
+| Uplink continuous while downlink plays independently | True full-duplex Voice Agent |
+| Resample at the module edge | External peers see a stable rate (8k/16k/…) |
+| Dedicated WS I/O path (e.g. libwsc-class lightweight client) | Avoid blocking the FS media thread |
+| Hard problems called out for commercial tier: session lifetime, thread-safe inject/shutdown, bounded memory, record interaction | These are **acceptance criteria for our MIT open build**, not paid extras |
+| API style `uuid_* start/stop` + metadata | Familiar to operators already using audio_stream |
+
+#### Where mod_audio_stream falls short (our opportunity)
+
+| Gap | Our answer |
+|-----|------------|
+| Community edition primarily **uni-directional**; full duplex / auto-playback concentrated in **commercial** builds (channel caps) | **MIT, full duplex + mark/clear in open core** — no 10-channel tax for the capability itself |
+| Wire protocol is **module-private** (L16 binary / ad-hoc JSON playback), not Twilio-shaped | **Twilio Media Streams L0 dialect** so existing bots/bridges port with minimal change |
+| No first-class public **`mark` / `clear`** semantics aligned with Twilio barge-in | Native playout queue + `clear` flush + mark ACK (already in `rtw_playout` / `rtw_session`) |
+| Bidirectional reliability historically uneven; many tutorials fall back to ESL `uuid_broadcast` | Single WS path for up+down; clear latency is a measured SLO |
+| Vendor AI adapters tend to creep toward the module | **Thin mod + Gateway** — module never embeds OpenAI/Gemini/阿里云 SDKs |
+| Multi-sink / analytics+agent on one call | Roadmap **L2 multi-sink** (beyond Twilio’s one bi-di stream/call limit) |
+| Server-mode / NAT-friendly listen | Roadmap **WS server mode** in addition to client dial-out |
+| Observability mostly logs | Explicit metrics: queue depth, drops, clear latency, mark RTT |
+
+#### Surpass checklist (must be true before calling v1 “done”)
+
+1. **Open duplex**: start→uplink media + downlink media + `clear` without commercial binary.
+2. **Twilio L0 interop**: a consumer written for Twilio Media Streams can talk to FS with documented deltas only.
+3. **FS-correct lifecycle**: hangup/transfer/park safe; no use-after-free; media bug not tied to ephemeral `${api(...)}`.
+4. **Thread contract**: bug callback = enqueue only; WS/resample on workers.
+5. **Bounded memory**: drop-oldest under backpressure; documented limits.
+6. **Record policy**: explicit flag whether injected audio enters `record_session`.
+7. **Measurable barge-in**: `clear` → audible stop within target P95 (see observability).
+8. **License clarity**: MIT for the whole shipping module path used in production duplex.
+
+Reference: [amigniter/mod_audio_stream](https://github.com/amigniter/mod_audio_stream), [v1.0.3 bi-directional notes](https://github.com/amigniter/mod_audio_stream/releases/tag/v1.0.3).
+
 ## 2. High-level diagram
 
 ```text
@@ -110,8 +153,10 @@ Expose counters/histograms (log and/or stats interface):
 | Approach | Pros | Cons |
 |----------|------|------|
 | **MRCP** | Standard ASR/TTS control | Poor fit for LLM/S2S; heavy SIP+RTP stack |
-| **mod_audio_stream** (existing) | Proven media fork | Not Twilio wire-compatible; licensing varies by edition |
-| **mod_realtime_ws** (this) | Twilio dialect + MIT + FS-native | Must implement carefully; early stage |
+| **mod_audio_stream** | Proven media-bug fork; mature duplex in commercial builds | Private wire format; duplex/gated features; not Twilio-shaped |
+| **mod_realtime_ws** (this) | Same media-bug foundation **plus** Twilio L0, open duplex, mark/clear, MIT, gateway split | Must still complete real FS `.so` wiring to match audio_stream’s production battle scars |
+
+**Rule of thumb:** if `mod_audio_stream` solved a hard FS problem (lifetime, inject races, record sync), we study that class of fix — then implement it openly and attach Twilio-compatible control semantics on top.
 
 ## 10. Repository layout (target)
 

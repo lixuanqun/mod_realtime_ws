@@ -19,8 +19,11 @@ Dates are intentionally omitted; order is by dependency risk.
 - [x] Clear/mark barge-in smoke
 - [x] Concurrent stress (`./scripts/stress_test.sh`) — verified 20×3s and 50×5s
 - [x] FS module skeleton + stub compile (`make mod-stub`)
-- [ ] Out-of-tree `.so` against real FreeSWITCH 1.10.x headers + media bug wiring
+- [x] Architecture: explicit **learn-from / surpass mod_audio_stream** checklist
+- [ ] Study mod_audio_stream public patterns (media bug, duplex playback, lifecycle) — implement equivalents under MIT (no proprietary code copy)
+- [ ] Out-of-tree `.so` against real FreeSWITCH 1.10.x headers + media bug wiring (**must follow FS mod norms + surpass checklist**)
 - [ ] Lua dialplan live on FS (example drafted in `conf/dialplan_example.lua`)
+- [ ] Side-by-side parity notes: audio_stream vs realtime_ws (features, latency, license)
 
 ## Phase 2 — Production hardening
 

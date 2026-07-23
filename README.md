@@ -2,7 +2,9 @@
 
 **FreeSWITCH module for bidirectional realtime call audio over WebSocket — wire-compatible with [Twilio Media Streams](https://www.twilio.com/docs/voice/media-streams).**
 
-> Status: **design / documentation first**. Implementation has not started. Contributions welcome on protocol fixtures, docs, and design review.
+Inspired by battle-tested [mod_audio_stream](https://github.com/amigniter/mod_audio_stream) media-bug patterns, but aimed to **surpass** it: MIT-open full duplex, Twilio `mark`/`clear` barge-in, thin mod + gateway split, multi-sink roadmap. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Positioning.
+
+> Status: **core L0 + sim/smoke/stress done**; real FreeSWITCH `.so` media-bug wiring still in progress. Contributions welcome.
 
 [English](#mod_realtime_ws) · [中文](#中文简介)
 
