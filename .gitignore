@@ -28,3 +28,8 @@ config.status
 *.ulaw
 *.pcm
 /tmp/
+
+# Node
+node_modules/
+package-lock.json
+
